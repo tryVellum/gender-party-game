@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Игрок — Gender Party{% endblock %}
+
+{% block content %}
+<main class="player-screen">
+  <div class="balloon balloon-blue"></div>
+  <div class="balloon balloon-pink"></div>
+
+  <section class="player-card">
+    <p class="eyebrow">Gender Party</p>
+
+    <div id="nickname-view">
+      <h1>Вход в игру</h1>
+
+      <p class="status-text">
+        Придумайте никнейм, который будет виден в рейтинге.
+      </p>
+
+      <form id="nickname-form" class="nickname-form">
+        <input
+          id="nickname-input"
+          class="text-input"
+          type="text"
+          maxlength="24"
+          placeholder="Например: МамаЛена"
+          autocomplete="off"
+          required
+        >
+
+        <button class="primary-button" type="submit">
+          Войти в игру
+        </button>
+      </form>
+
+      <p id="nickname-error" class="error-text"></p>
+    </div>
+
+    <div id="player-view" class="hidden">
+      <h1 id="player-greeting">Привет!</h1>
+
+      <div class="score-card">
+        <p>Твои баллы</p>
+        <strong id="player-score">0</strong>
+      </div>
+
+      <div id="waiting-state">
+        <p class="status-text">
+          Ждём начала игры...
+        </p>
+      </div>
+
+      <div id="question-state" class="hidden">
+        <p id="player-question-meta" class="question-category"></p>
+        <h2 id="player-question-title" class="player-question-title"></h2>
+
+        <div id="player-question-image-wrap" class="question-image-wrap player-question-image-wrap hidden">
+          <img
+            id="player-question-image"
+            class="question-image"
+            src=""
+            alt=""
+          >
+        </div>
+
+        <div id="player-answer-area"></div>
+
+        <p id="player-answer-status" class="answer-status"></p>
+      </div>
+
+      <div id="final-state" class="hidden">
+        <p class="question-category">Финальный раунд</p>
+        <h2 class="player-question-title">Кто родится?</h2>
+
+        <div class="final-player-choices">
+          <button id="final-boy-button" class="final-player-button boy" type="button">
+            Мальчик
+          </button>
+
+          <button id="final-girl-button" class="final-player-button girl" type="button">
+            Девочка
+          </button>
+        </div>
+
+        <p id="final-player-status" class="answer-status"></p>
+      </div>
+
+      <div id="secret-state" class="hidden">
+        <p class="question-category">Секретный раунд</p>
+        <h2 class="player-question-title">Какое имя выбрать?</h2>
+
+        <form id="baby-name-form" class="text-answer-form">
+          <input
+            id="baby-name-input"
+            class="text-input"
+            type="text"
+            maxlength="32"
+            placeholder="Введите имя"
+            autocomplete="off"
+            required
+          >
+
+          <button class="primary-button" type="submit">
+            Отправить имя
+          </button>
+        </form>
+
+        <p id="baby-name-status" class="answer-status"></p>
+
+        <div id="baby-names-list" class="baby-names-list"></div>
+      </div>
+
+      <div class="info-box">
+        <p><strong>Статус:</strong> <span id="connection-status">Подключение...</span></p>
+      </div>
+
+    </div>
+  </section>
+</main>
+
+<script src="{{ url_for('static', filename='js/socket.js') }}"></script>
+<script src="{{ url_for('static', filename='js/player.js') }}"></script>
+{% endblock %}

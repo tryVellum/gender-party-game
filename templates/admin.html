@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}Администратор — Gender Party{% endblock %}
+
+{% block content %}
+<main class="admin-screen">
+  <section class="admin-panel">
+    <div class="admin-header">
+      <div>
+        <p class="eyebrow">Gender Party</p>
+        <h1>Наша игра</h1>
+      </div>
+
+      <div class="admin-actions">
+        <button
+          id="player-link-button"
+          class="secondary-button icon-button qr-icon-button"
+          type="button"
+          aria-label="Показать QR-код подключения"
+          title="QR-код подключения"
+        >
+          <span class="qr-button-icon" aria-hidden="true"></span>
+        </button>
+
+        <button
+          id="fullscreen-button"
+          class="secondary-button icon-button fullscreen-icon-button"
+          type="button"
+          aria-label="На весь экран"
+          title="На весь экран"
+        >
+          <span class="fullscreen-button-icon" aria-hidden="true"></span>
+        </button>
+
+        <button id="open-rating-button" class="secondary-button">
+          Рейтинг
+        </button>
+
+        <button id="final-round-button" class="secondary-button final-button" disabled>
+          Финальный раунд
+        </button>
+
+        <button id="reset-game-button" class="secondary-button danger-button">
+          Сбросить игру
+        </button>
+      </div>
+    </div>
+
+    <div id="admin-board" class="admin-board">
+      <div class="board-loading">Загрузка игрового поля...</div>
+    </div>
+  </section>
+</main>
+
+<div id="rating-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close-rating></div>
+
+  <section class="modal-card">
+    <div class="modal-header">
+      <h2>Рейтинг игроков</h2>
+
+      <button class="close-button" type="button" data-close-rating>
+        ×
+      </button>
+    </div>
+
+    <table class="rating-table">
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Никнейм</th>
+          <th>Баллы</th>
+        </tr>
+      </thead>
+
+      <tbody id="rating-table-body">
+        <tr>
+          <td colspan="3">Пока нет игроков</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<div id="player-link-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close-player-link></div>
+
+  <section class="modal-card player-link-card">
+    <div class="modal-header">
+      <h2>Подключение игроков</h2>
+
+      <button class="close-button" type="button" data-close-player-link>
+        ×
+      </button>
+    </div>
+
+    <div class="player-link-content">
+      <p class="status-text">
+        Игрокам нужно открыть эту ссылку или отсканировать QR-код.
+      </p>
+
+      <img
+        id="player-link-qr-image"
+        class="player-link-qr-image"
+        src=""
+        alt="QR-код подключения к игре"
+      >
+
+      <a id="player-link-url" class="player-link-url" href="#" target="_blank" rel="noopener">
+        Загрузка ссылки...
+      </a>
+
+      <button id="copy-player-link-button" class="secondary-button" type="button">
+        Скопировать ссылку
+      </button>
+
+      <p id="player-link-status" class="answer-status"></p>
+    </div>
+  </section>
+</div>
+
+<div id="question-modal" class="question-modal hidden">
+  <section id="admin-question-card" class="admin-question-card">
+    <p id="admin-question-category" class="question-category"></p>
+    <h2 id="admin-question-title"></h2>
+
+    <div id="admin-question-image-wrap" class="question-image-wrap admin-question-image-wrap hidden">
+      <img
+        id="admin-question-image"
+        class="question-image"
+        src=""
+        alt=""
+      >
+    </div>
+
+    <div id="admin-question-options" class="admin-question-options"></div>
+
+    <p class="question-close-hint">
+      Нажмите на карточку, чтобы закрыть вопрос
+    </p>
+  </section>
+</div>
+
+<div id="final-modal" class="question-modal hidden">
+  <section id="final-card" class="final-card">
+    <p class="question-category">Финальный раунд</p>
+
+    <h2 id="final-title">Кто родится?</h2>
+
+    <div id="final-admin-choices" class="final-admin-choices">
+      <div class="final-choice-card boy">
+        <strong id="boy-votes-count">0</strong>
+        <span>Мальчик</span>
+      </div>
+
+      <div class="final-choice-card girl">
+        <strong id="girl-votes-count">0</strong>
+        <span>Девочка</span>
+      </div>
+    </div>
+
+    <p id="final-hint" class="question-close-hint">
+      Нажмите на карточку, чтобы раскрыть ответ
+    </p>
+  </section>
+</div>
+
+
+<div id="secret-modal" class="question-modal hidden">
+  <section id="secret-card" class="secret-card">
+    <p class="question-category">Секретный раунд</p>
+
+    <h2>Какое имя выбрать?</h2>
+
+    <div class="secret-admin-table-wrap">
+      <table class="rating-table">
+        <thead>
+          <tr>
+            <th>Имя</th>
+            <th>Рейтинг</th>
+          </tr>
+        </thead>
+
+        <tbody id="secret-admin-names-body">
+          <tr>
+            <td colspan="2">Пока нет имён</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+
+<script src="{{ url_for('static', filename='js/socket.js') }}"></script>
+<script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+{% endblock %}
