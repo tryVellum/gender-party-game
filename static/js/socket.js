@@ -9,15 +9,102 @@ const socket = io({
 const connectionStatusElement = document.getElementById("connection-status");
 const serverMessageElement = document.getElementById("server-message");
 
+let serverClockOffsetMs = 0;
+let bestTimeSyncRttMs = Number.POSITIVE_INFINITY;
+let timeSyncBurstTimeoutIds = [];
+
+function clearTimeSyncBurst() {
+  timeSyncBurstTimeoutIds.forEach((timeoutId) => {
+    window.clearTimeout(timeoutId);
+  });
+  timeSyncBurstTimeoutIds = [];
+}
+
+function requestServerTimeSync() {
+  if (!socket.connected) {
+    return;
+  }
+
+  socket.emit("time_sync_request", {
+    client_sent_at_ms: Date.now(),
+  });
+}
+
+function startTimeSyncBurst() {
+  clearTimeSyncBurst();
+  bestTimeSyncRttMs = Number.POSITIVE_INFINITY;
+
+  [0, 180, 420, 800, 1300].forEach((delayMs) => {
+    const timeoutId = window.setTimeout(requestServerTimeSync, delayMs);
+    timeSyncBurstTimeoutIds.push(timeoutId);
+  });
+}
+
+function getSynchronizedServerTimeMs() {
+  return Date.now() + serverClockOffsetMs;
+}
+
+function scheduleAtServerTime(targetServerTimeMs, callback) {
+  const target = Number(targetServerTimeMs);
+
+  if (!Number.isFinite(target)) {
+    callback();
+    return null;
+  }
+
+  const delayMs = Math.max(0, target - getSynchronizedServerTimeMs());
+  return window.setTimeout(callback, delayMs);
+}
+
+window.getSynchronizedServerTimeMs = getSynchronizedServerTimeMs;
+window.scheduleAtServerTime = scheduleAtServerTime;
+
 socket.on("connect", () => {
   if (connectionStatusElement) {
     connectionStatusElement.textContent = "Подключено";
   }
+
+  startTimeSyncBurst();
 });
 
 socket.on("disconnect", () => {
+  clearTimeSyncBurst();
+
   if (connectionStatusElement) {
     connectionStatusElement.textContent = "Соединение потеряно";
+  }
+});
+
+socket.on("time_sync_response", (data) => {
+  const clientSentAtMs = Number(data && data.client_sent_at_ms);
+  const serverTimeMs = Number(data && data.server_time_ms);
+  const clientReceivedAtMs = Date.now();
+
+  if (!Number.isFinite(clientSentAtMs) || !Number.isFinite(serverTimeMs)) {
+    return;
+  }
+
+  const roundTripTimeMs = Math.max(0, clientReceivedAtMs - clientSentAtMs);
+  const clientMidpointMs = clientSentAtMs + (roundTripTimeMs / 2);
+  const measuredOffsetMs = serverTimeMs - clientMidpointMs;
+
+  if (roundTripTimeMs <= bestTimeSyncRttMs) {
+    bestTimeSyncRttMs = roundTripTimeMs;
+    serverClockOffsetMs = measuredOffsetMs;
+  }
+});
+
+window.setInterval(() => {
+  requestServerTimeSync();
+}, 30000);
+
+window.addEventListener("focus", () => {
+  startTimeSyncBurst();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    startTimeSyncBurst();
   }
 });
 

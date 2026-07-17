@@ -34,13 +34,125 @@ const secretModal = document.getElementById("secret-modal");
 const secretAdminNamesBody = document.getElementById("secret-admin-names-body");
 
 const resetGameButton = document.getElementById("reset-game-button");
+const finalResetGameButton = document.getElementById("final-reset-game-button");
+const secretResetGameButton = document.getElementById("secret-reset-game-button");
+
+const drumrollAudio = document.getElementById("admin-drumroll-audio");
+const babyLaughterAudio = document.getElementById("admin-baby-laughter-audio");
+const auctionAudio = document.getElementById("admin-auction-audio");
 
 let isFinalRevealing = false;
 let isFinalRevealed = false;
 let currentQuestion = null;
 let isClosingQuestion = false;
 let currentPlayerLink = "";
+let activeFinalSequenceId = null;
+let drumrollStartTimeoutId = null;
+let finalRevealTimeoutId = null;
+let lastBabySoundSequenceId = null;
+let audioUnlocked = false;
 
+
+function getServerNowMs() {
+  if (typeof window.getSynchronizedServerTimeMs === "function") {
+    return window.getSynchronizedServerTimeMs();
+  }
+
+  return Date.now();
+}
+
+function scheduleForServerTime(targetServerTimeMs, callback) {
+  if (typeof window.scheduleAtServerTime === "function") {
+    return window.scheduleAtServerTime(targetServerTimeMs, callback);
+  }
+
+  return window.setTimeout(
+    callback,
+    Math.max(0, Number(targetServerTimeMs) - Date.now()),
+  );
+}
+
+function stopAudio(audio, reset = true) {
+  if (!audio) {
+    return;
+  }
+
+  audio.pause();
+
+  if (reset) {
+    try {
+      audio.currentTime = 0;
+    } catch (error) {
+      console.warn("Не удалось сбросить аудиодорожку.", error);
+    }
+  }
+}
+
+async function playAudio(audio, { loop = false, offsetSeconds = 0 } = {}) {
+  if (!audio) {
+    return;
+  }
+
+  audio.loop = loop;
+
+  try {
+    audio.currentTime = Math.max(0, Number(offsetSeconds) || 0);
+    await audio.play();
+  } catch (error) {
+    console.warn("Браузер заблокировал воспроизведение звука.", error);
+  }
+}
+
+async function unlockAdminAudio() {
+  if (audioUnlocked) {
+    return;
+  }
+
+  const audioElements = [drumrollAudio, babyLaughterAudio, auctionAudio].filter(Boolean);
+
+  try {
+    await Promise.all(audioElements.map(async (audio) => {
+      const previousMuted = audio.muted;
+      audio.muted = true;
+
+      try {
+        await audio.play();
+      } finally {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = previousMuted;
+      }
+    }));
+
+    audioUnlocked = true;
+  } catch (error) {
+    console.warn("Предварительная активация звука не выполнена.", error);
+  }
+}
+
+function playAuctionSound() {
+  if (!auctionAudio || !auctionAudio.paused) {
+    return;
+  }
+
+  playAudio(auctionAudio, { loop: true });
+}
+
+function stopAuctionSound() {
+  stopAudio(auctionAudio);
+}
+
+function clearFinalSequenceTimers() {
+  if (drumrollStartTimeoutId !== null) {
+    window.clearTimeout(drumrollStartTimeoutId);
+    drumrollStartTimeoutId = null;
+  }
+
+  if (finalRevealTimeoutId !== null) {
+    window.clearTimeout(finalRevealTimeoutId);
+    finalRevealTimeoutId = null;
+  }
+}
 
 async function openPlayerLinkModal() {
   playerLinkModal.classList.remove("hidden");
@@ -285,6 +397,10 @@ function renderAdminQuestionCard(question, auction = null, winner = null) {
 }
 
 function hideAdminQuestionCard() {
+  if (currentQuestion && currentQuestion.is_auction) {
+    stopAuctionSound();
+  }
+
   currentQuestion = null;
   questionModal.classList.add("hidden");
   adminQuestionCard.classList.remove("auction-question-card");
@@ -296,10 +412,16 @@ function hideAdminQuestionCard() {
 }
 
 function showFinalModal(counts = { boy: 0, girl: 0 }) {
-  finalModal.classList.remove("hidden");
+  clearFinalSequenceTimers();
+  activeFinalSequenceId = null;
+  isFinalRevealing = false;
   isFinalRevealed = false;
 
-  finalCard.classList.remove("final-reveal-card", "final-reveal-girl");
+  stopAudio(drumrollAudio);
+  stopAudio(babyLaughterAudio);
+
+  finalModal.classList.remove("hidden");
+  finalCard.classList.remove("final-drumroll-card", "final-reveal-card");
   finalTitle.textContent = "Кто родится?";
   finalAdminChoices.classList.remove("hidden");
   finalHint.textContent = "Нажмите на карточку, чтобы раскрыть ответ";
@@ -311,28 +433,112 @@ function updateFinalCounts(counts) {
   girlVotesCount.textContent = String(counts.girl || 0);
 }
 
-function showFinalDrumroll() {
+function showFinalDrumroll(schedule = null) {
+  finalModal.classList.remove("hidden");
+  finalCard.classList.remove("final-reveal-card");
+  finalCard.classList.add("final-drumroll-card");
   finalTitle.textContent = "Барабанная дробь...";
   finalAdminChoices.classList.add("hidden");
   finalHint.textContent = "";
-  finalCard.classList.add("final-drumroll-card");
+  isFinalRevealing = true;
+  isFinalRevealed = false;
+
+  const drumrollStartAtMs = Number(schedule && schedule.drumroll_start_at_ms);
+  const elapsedMs = Number.isFinite(drumrollStartAtMs)
+    ? Math.max(0, getServerNowMs() - drumrollStartAtMs)
+    : 0;
+
+  stopAudio(drumrollAudio);
+  playAudio(drumrollAudio, {
+    offsetSeconds: Math.min(elapsedMs / 1000, 6.9),
+  });
 }
 
-function showFinalReveal(actualGender = "boy") {
+function showFinalReveal(answer = "boy", sequenceId = null, playSound = true) {
+  const alreadyShowingThisReveal = isFinalRevealed
+    && (!sequenceId || activeFinalSequenceId === sequenceId);
+
+  finalModal.classList.remove("hidden");
   finalCard.classList.remove("final-drumroll-card");
-  isFinalRevealed = true;
-
-  const isGirl = actualGender === "girl";
-
   finalCard.classList.add("final-reveal-card");
-  finalCard.classList.toggle("final-reveal-girl", isGirl);
-  finalTitle.textContent = isGirl ? "ДЕВОЧКА!" : "МАЛЬЧИК!";
   finalAdminChoices.classList.add("hidden");
+
+  isFinalRevealing = false;
+  isFinalRevealed = true;
+  finalTitle.textContent = answer === "girl" ? "ДЕВОЧКА!" : "МАЛЬЧИК!";
   finalHint.textContent = "Нажмите, чтобы перейти к секретному раунду";
 
-  if (typeof window.launchGenderConfetti === "function") {
+  stopAudio(drumrollAudio);
+
+  if (playSound && sequenceId !== lastBabySoundSequenceId) {
+    lastBabySoundSequenceId = sequenceId;
+    stopAudio(babyLaughterAudio);
+    playAudio(babyLaughterAudio);
+  }
+
+  if (!alreadyShowingThisReveal && typeof window.launchGenderConfetti === "function") {
     window.launchGenderConfetti();
   }
+}
+
+function scheduleFinalDrumroll(schedule) {
+  if (!schedule || !schedule.sequence_id) {
+    return;
+  }
+
+  const sequenceId = String(schedule.sequence_id);
+  const drumrollStartAtMs = Number(schedule.drumroll_start_at_ms);
+  const revealAtMs = Number(schedule.reveal_at_ms);
+
+  if (!Number.isFinite(drumrollStartAtMs) || !Number.isFinite(revealAtMs)) {
+    return;
+  }
+
+  if (activeFinalSequenceId !== sequenceId) {
+    clearFinalSequenceTimers();
+    activeFinalSequenceId = sequenceId;
+  }
+
+  finalModal.classList.remove("hidden");
+  finalAdminChoices.classList.add("hidden");
+  isFinalRevealing = true;
+
+  if (getServerNowMs() >= drumrollStartAtMs) {
+    if (!finalCard.classList.contains("final-drumroll-card") && !isFinalRevealed) {
+      showFinalDrumroll(schedule);
+    }
+  } else if (drumrollStartTimeoutId === null) {
+    drumrollStartTimeoutId = scheduleForServerTime(drumrollStartAtMs, () => {
+      drumrollStartTimeoutId = null;
+      showFinalDrumroll(schedule);
+    });
+  }
+}
+
+function scheduleFinalRevealDisplay(data) {
+  const sequenceId = String(data.sequence_id || activeFinalSequenceId || "");
+  const revealAtMs = Number(data.reveal_at_ms);
+  const answer = data.answer || "boy";
+
+  if (!Number.isFinite(revealAtMs)) {
+    showFinalReveal(answer, sequenceId);
+    return;
+  }
+
+  if (activeFinalSequenceId && sequenceId && activeFinalSequenceId !== sequenceId) {
+    return;
+  }
+
+  activeFinalSequenceId = sequenceId || activeFinalSequenceId;
+
+  if (finalRevealTimeoutId !== null) {
+    window.clearTimeout(finalRevealTimeoutId);
+  }
+
+  finalRevealTimeoutId = scheduleForServerTime(revealAtMs, () => {
+    finalRevealTimeoutId = null;
+    showFinalReveal(answer, sequenceId);
+  });
 }
 
 function renderSecretNames(names) {
@@ -420,6 +626,12 @@ async function resetGame() {
   hideAdminQuestionCard();
   finalModal.classList.add("hidden");
   secretModal.classList.add("hidden");
+  clearFinalSequenceTimers();
+  stopAuctionSound();
+  stopAudio(drumrollAudio);
+  stopAudio(babyLaughterAudio);
+  activeFinalSequenceId = null;
+  lastBabySoundSequenceId = null;
 
   renderBoard(data.board || [], Boolean(data.all_questions_used));
   renderRating(data.players || []);
@@ -431,26 +643,26 @@ async function revealFinalRound() {
   }
 
   isFinalRevealing = true;
-  showFinalDrumroll();
+  await unlockAdminAudio();
 
-  window.setTimeout(async () => {
-    try {
-      const response = await fetchWithTimeout("/api/admin/final/reveal", {
-        method: "POST",
-      });
+  try {
+    const response = await fetchWithTimeout("/api/admin/final/reveal", {
+      method: "POST",
+    });
 
-      const data = await response.json();
+    const data = await response.json();
 
-      if (!response.ok) {
-        alert(data.message || "Не удалось раскрыть финальный ответ.");
-        return;
-      }
-
-      showFinalReveal(data.answer);
-    } finally {
+    if (!response.ok) {
       isFinalRevealing = false;
+      alert(data.message || "Не удалось раскрыть финальный ответ.");
+      return;
     }
-  }, 2000);
+
+    scheduleFinalDrumroll(data.schedule);
+  } catch (error) {
+    isFinalRevealing = false;
+    alert("Не удалось запланировать финальное раскрытие. Проверьте соединение с сервером.");
+  }
 }
 
 async function loadCurrentGameState() {
@@ -461,17 +673,62 @@ async function loadCurrentGameState() {
   }
 
   const data = await response.json();
+  const phase = data.state && data.state.current_phase;
+
+  if (phase === "final_open") {
+    if (finalModal.classList.contains("hidden") || isFinalRevealed || isFinalRevealing) {
+      showFinalModal(data.final_counts || { boy: 0, girl: 0 });
+    } else {
+      updateFinalCounts(data.final_counts || { boy: 0, girl: 0 });
+    }
+    return;
+  }
+
+  if (phase === "final_drumroll" || phase === "final_revealing") {
+    updateFinalCounts(data.final_counts || { boy: 0, girl: 0 });
+    scheduleFinalDrumroll(data.final_schedule);
+    return;
+  }
+
+  if (phase === "final_revealed") {
+    const schedule = data.final_schedule;
+    const revealAtMs = Number(schedule && schedule.reveal_at_ms);
+    const sequenceId = schedule && schedule.sequence_id;
+
+    if (Number.isFinite(revealAtMs) && getServerNowMs() < revealAtMs) {
+      scheduleFinalDrumroll(schedule);
+      scheduleFinalRevealDisplay({
+        answer: data.state.actual_gender || "boy",
+        sequence_id: sequenceId,
+        reveal_at_ms: revealAtMs,
+      });
+    } else {
+      showFinalReveal(
+        data.state.actual_gender || "boy",
+        sequenceId,
+        false,
+      );
+    }
+    return;
+  }
+
+  if (phase === "secret_names") {
+    showSecretModal(data.baby_names || []);
+    return;
+  }
 
   if (!data.question || !data.state || !data.state.question_open) {
     return;
   }
 
-  if (data.state.current_phase === "auction_bidding") {
+  if (phase === "auction_bidding") {
     renderAdminQuestionCard(data.question, data.auction || null);
+    playAuctionSound();
     return;
   }
 
-  if (data.state.current_phase === "auction_question") {
+  if (phase === "auction_question") {
+    stopAuctionSound();
     renderAdminQuestionCard(
       data.question,
       null,
@@ -514,6 +771,10 @@ async function openQuestion(questionId) {
 
     alert(data.message || "Не удалось открыть вопрос.");
     return;
+  }
+
+  if (data.question && data.question.is_auction) {
+    playAuctionSound();
   }
 
   renderAdminQuestionCard(data.question, data.auction || null);
@@ -583,6 +844,10 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+document.addEventListener("pointerdown", () => {
+  unlockAdminAudio();
+}, { once: true });
+
 if (playerLinkButton) {
   playerLinkButton.addEventListener("click", openPlayerLinkModal);
 }
@@ -617,6 +882,22 @@ if (resetGameButton) {
   resetGameButton.addEventListener("click", resetGame);
 }
 
+if (finalResetGameButton) {
+  finalResetGameButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    resetGame();
+  });
+}
+
+if (secretResetGameButton) {
+  secretResetGameButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    resetGame();
+  });
+}
+
 if (finalCard) {
   finalCard.addEventListener("click", () => {
     if (isFinalRevealed) {
@@ -640,6 +921,17 @@ socket.on("board_updated", (data) => {
   renderBoard(data.board || [], Boolean(data.all_questions_used));
 });
 
+socket.on("game_reset", () => {
+  clearFinalSequenceTimers();
+  stopAuctionSound();
+  stopAudio(drumrollAudio);
+  stopAudio(babyLaughterAudio);
+  activeFinalSequenceId = null;
+  isFinalRevealing = false;
+  isFinalRevealed = false;
+});
+
+
 socket.on("question_opened", (data) => {
   if (data.question) {
     renderAdminQuestionCard(data.question);
@@ -647,6 +939,7 @@ socket.on("question_opened", (data) => {
 });
 
 socket.on("question_closed", (data) => {
+  stopAuctionSound();
   hideAdminQuestionCard();
   renderBoard(data.board || [], Boolean(data.all_questions_used));
 });
@@ -660,6 +953,8 @@ socket.on("auction_started", (data) => {
   if (!data.auction) {
     return;
   }
+
+  playAuctionSound();
 
   renderAdminQuestionCard(
     {
@@ -685,6 +980,7 @@ socket.on("auction_winner_selected", (data) => {
     return;
   }
 
+  stopAuctionSound();
   renderAdminQuestionCard(currentQuestion, null, data.winner);
 });
 
@@ -696,8 +992,12 @@ socket.on("final_vote_updated", (data) => {
   updateFinalCounts(data.counts || { boy: 0, girl: 0 });
 });
 
+socket.on("final_reveal_scheduled", (data) => {
+  scheduleFinalDrumroll(data.schedule);
+});
+
 socket.on("final_revealed", (data) => {
-  showFinalReveal(data.answer);
+  scheduleFinalRevealDisplay(data);
 });
 
 socket.on("secret_started", (data) => {

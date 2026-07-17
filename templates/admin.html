@@ -142,6 +142,17 @@
 </div>
 
 <div id="final-modal" class="question-modal hidden">
+  <button
+    id="final-reset-game-button"
+    class="secondary-button danger-button final-reset-button"
+    type="button"
+    aria-label="Сбросить игру и начать заново"
+    title="Сбросить игру"
+  >
+    <span class="final-reset-button-icon" aria-hidden="true">↻</span>
+    <span>Сбросить игру</span>
+  </button>
+
   <section id="final-card" class="final-card">
     <p class="question-category">Финальный раунд</p>
 
@@ -167,6 +178,17 @@
 
 
 <div id="secret-modal" class="question-modal hidden">
+  <button
+    id="secret-reset-game-button"
+    class="secondary-button danger-button final-reset-button"
+    type="button"
+    aria-label="Сбросить игру и начать заново"
+    title="Сбросить игру"
+  >
+    <span class="final-reset-button-icon" aria-hidden="true">↻</span>
+    <span>Сбросить игру</span>
+  </button>
+
   <section id="secret-card" class="secret-card">
     <p class="question-category">Секретный раунд</p>
 
@@ -191,6 +213,25 @@
   </section>
 </div>
 
+
+<audio
+  id="admin-drumroll-audio"
+  preload="auto"
+  src="{{ url_for('game_audio', filename='zvuk-barabannoj-drobi.mp3') }}"
+></audio>
+
+<audio
+  id="admin-baby-laughter-audio"
+  preload="auto"
+  src="{{ url_for('game_audio', filename='the-sound-of-happy-baby-laughter.mp3') }}"
+></audio>
+
+<audio
+  id="admin-auction-audio"
+  preload="auto"
+  loop
+  src="{{ url_for('game_audio', filename='piano-chord-disturbing.mp3') }}"
+></audio>
 
 <script src="{{ url_for('static', filename='js/socket.js') }}"></script>
 <script src="{{ url_for('static', filename='js/admin.js') }}"></script>

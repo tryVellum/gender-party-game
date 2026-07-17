@@ -261,6 +261,27 @@ def init_database() -> None:
 
         ensure_column(
             connection=connection,
+            table_name="game_state",
+            column_name="final_drumroll_start_at_ms",
+            column_definition="INTEGER",
+        )
+
+        ensure_column(
+            connection=connection,
+            table_name="game_state",
+            column_name="final_reveal_at_ms",
+            column_definition="INTEGER",
+        )
+
+        ensure_column(
+            connection=connection,
+            table_name="game_state",
+            column_name="final_reveal_sequence_id",
+            column_definition="TEXT",
+        )
+
+        ensure_column(
+            connection=connection,
             table_name="questions",
             column_name="image_filename",
             column_definition="TEXT",
@@ -365,6 +386,39 @@ def set_player_connected(device_token: str, connected: bool) -> None:
         )
 
 
+def synchronize_player_connections(active_device_tokens: set[str]) -> None:
+    """Replace stored connection flags with a freshly confirmed presence snapshot."""
+    normalized_tokens = sorted(
+        {
+            token.strip()
+            for token in active_device_tokens
+            if isinstance(token, str) and token.strip()
+        }
+    )
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE players
+            SET connected = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE connected != 0
+            """
+        )
+
+        if not normalized_tokens:
+            return
+
+        placeholders = ", ".join("?" for _ in normalized_tokens)
+        connection.execute(
+            f"""
+            UPDATE players
+            SET connected = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE device_token IN ({placeholders})
+            """,
+            normalized_tokens,
+        )
+
+
 def list_players() -> list[dict[str, Any]]:
     """Return all players ordered by score descending."""
     with get_connection() as connection:
@@ -378,114 +432,6 @@ def list_players() -> list[dict[str, Any]]:
 
     return [dict(row) for row in rows]
 
-
-EXPECTED_CATEGORIES = ("Беременность", "Родители", "Роды", "Что это?")
-EXPECTED_POINTS = (100, 200, 300, 400, 500)
-
-
-def validate_questions(questions: list[dict[str, Any]]) -> None:
-    """Validate the JSON question set against the fixed game-board layout."""
-    if not questions:
-        raise ValueError("Questions JSON must not be empty.")
-
-    seen_ids: set[str] = set()
-    seen_cells: set[tuple[str, int]] = set()
-
-    for index, question in enumerate(questions, start=1):
-        if not isinstance(question, dict):
-            raise ValueError(f"Question #{index} must be an object.")
-
-        question_id = str(question.get("id", "")).strip()
-        category = str(question.get("category", "")).strip()
-        question_type = str(question.get("type", "")).strip()
-        question_text = str(question.get("question", "")).strip()
-
-        try:
-            points = int(question.get("points"))
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"Question #{index} has invalid points.") from error
-
-        if not question_id:
-            raise ValueError(f"Question #{index} has no id.")
-        if question_id in seen_ids:
-            raise ValueError(f"Duplicate question id: {question_id}")
-        seen_ids.add(question_id)
-
-        if category not in EXPECTED_CATEGORIES:
-            raise ValueError(
-                f"Question {question_id} has unsupported category: {category}. "
-                f"Allowed categories: {', '.join(EXPECTED_CATEGORIES)}."
-            )
-        if points not in EXPECTED_POINTS:
-            raise ValueError(
-                f"Question {question_id} has unsupported points: {points}. "
-                f"Allowed values: {EXPECTED_POINTS}."
-            )
-
-        board_cell = (category, points)
-        if board_cell in seen_cells:
-            raise ValueError(f"Duplicate board cell: {category}, {points} points.")
-        seen_cells.add(board_cell)
-
-        if question_type not in {"choice", "text"}:
-            raise ValueError(
-                f"Question {question_id} has unsupported type: {question_type}."
-            )
-        if not question_text:
-            raise ValueError(f"Question {question_id} has empty text.")
-
-        options = question.get("options", [])
-        correct_answers = question.get("correct_answers", [])
-
-        if not isinstance(options, list) or not all(
-            isinstance(item, str) for item in options
-        ):
-            raise ValueError(
-                f"Question {question_id}: options must be a list of strings."
-            )
-        if (
-            not isinstance(correct_answers, list)
-            or not correct_answers
-            or not all(
-                isinstance(item, str) and item.strip() for item in correct_answers
-            )
-        ):
-            raise ValueError(
-                f"Question {question_id}: correct_answers must contain at least one string."
-            )
-        if question_type == "choice" and not options:
-            raise ValueError(f"Question {question_id}: choice question has no options.")
-
-        image_filename = question.get("image")
-        if image_filename:
-            image_path = Path(str(image_filename))
-            if image_path.name != str(
-                image_filename
-            ) or image_path.suffix.lower() not in {
-                ".jpg",
-                ".jpeg",
-            }:
-                raise ValueError(
-                    f"Question {question_id}: image must be a JPG file in the data folder."
-                )
-            if not (QUESTIONS_PATH.parent / image_path.name).is_file():
-                raise FileNotFoundError(
-                    f"Question image was not found: {QUESTIONS_PATH.parent / image_path.name}"
-                )
-
-    expected_cells = {
-        (category, points)
-        for category in EXPECTED_CATEGORIES
-        for points in EXPECTED_POINTS
-    }
-    missing_cells = sorted(expected_cells - seen_cells)
-    if missing_cells:
-        missing_text = ", ".join(
-            f"{category} — {points}" for category, points in missing_cells
-        )
-        raise ValueError(f"Questions JSON is missing board cells: {missing_text}")
-
-
 def load_questions_from_json() -> list[dict[str, Any]]:
     """Load questions from JSON file."""
     if not QUESTIONS_PATH.exists():
@@ -497,7 +443,6 @@ def load_questions_from_json() -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise ValueError("Questions JSON must contain a list.")
 
-    validate_questions(data)
     return data
 
 
@@ -546,35 +491,6 @@ def seed_questions() -> None:
                     1 if question.get("is_auction", False) else 0,
                 ),
             )
-
-        question_ids = [str(question["id"]) for question in questions]
-        placeholders = ",".join("?" for _ in question_ids)
-
-        for table_name in ("answers", "auction_participants", "auction_bids"):
-            connection.execute(
-                f"DELETE FROM {table_name} WHERE question_id NOT IN ({placeholders})",
-                question_ids,
-            )
-
-        connection.execute(
-            f"DELETE FROM questions WHERE id NOT IN ({placeholders})",
-            question_ids,
-        )
-
-        connection.execute(
-            f"""
-            UPDATE game_state
-            SET
-                current_phase = 'waiting',
-                current_question_id = NULL,
-                question_open = 0,
-                auction_winner_player_id = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE current_question_id IS NOT NULL
-              AND current_question_id NOT IN ({placeholders})
-            """,
-            question_ids,
-        )
 
 
 def parse_question_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -722,7 +638,10 @@ def get_game_state() -> dict[str, Any]:
                 auction_winner_player_id,
                 final_locked,
                 actual_gender,
-                secret_round_open
+                secret_round_open,
+                final_drumroll_start_at_ms,
+                final_reveal_at_ms,
+                final_reveal_sequence_id
             FROM game_state
             WHERE id = 1
             """
@@ -857,7 +776,8 @@ def is_answer_correct(
     normalized_player_answer = normalize_answer(player_answer)
 
     normalized_correct_answers = {
-        normalize_answer(correct_answer) for correct_answer in correct_answers
+        normalize_answer(correct_answer)
+        for correct_answer in correct_answers
     }
 
     return normalized_player_answer in normalized_correct_answers
@@ -960,9 +880,7 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
 
         for answer in answers:
             correct = normalize_answer(answer["answer"]) in normalized_correct_answers
-            points_delta = (
-                int(question["points"]) if correct else -int(question["points"])
-            )
+            points_delta = int(question["points"]) if correct else -int(question["points"])
 
             connection.execute(
                 """
@@ -1040,7 +958,6 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
 
     return score_updates
 
-
 def list_active_players() -> list[dict[str, Any]]:
     """Return connected players who can participate in auction."""
     with get_connection() as connection:
@@ -1079,7 +996,10 @@ def create_auction_snapshot(question_id: str) -> list[dict[str, Any]]:
             )
             VALUES (?, ?)
             """,
-            [(question_id, int(player["id"])) for player in active_players],
+            [
+                (question_id, int(player["id"]))
+                for player in active_players
+            ],
         )
 
     return active_players
@@ -1304,9 +1224,7 @@ def set_auction_winner(
     )
 
 
-def close_auction_question_and_calculate_score(
-    question_id: str,
-) -> list[dict[str, Any]]:
+def close_auction_question_and_calculate_score(question_id: str) -> list[dict[str, Any]]:
     """Close auction question and calculate winner score by bid."""
     state = get_game_state()
     winner_player_id = state.get("auction_winner_player_id")
@@ -1371,12 +1289,8 @@ def close_auction_question_and_calculate_score(
 
     return score_updates
 
-
-def start_final_round(actual_gender: str) -> None:
-    """Start final gender voting round with configured reveal answer."""
-    if actual_gender not in {"boy", "girl"}:
-        raise ValueError("Actual gender must be either 'boy' or 'girl'.")
-
+def start_final_round() -> None:
+    """Start final gender voting round."""
     with get_connection() as connection:
         connection.execute(
             """
@@ -1393,11 +1307,53 @@ def start_final_round(actual_gender: str) -> None:
                 question_open = 0,
                 auction_winner_player_id = NULL,
                 final_locked = 0,
-                actual_gender = ?,
+                actual_gender = 'boy',
+                final_drumroll_start_at_ms = NULL,
+                final_reveal_at_ms = NULL,
+                final_reveal_sequence_id = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
+            """
+        )
+
+
+def schedule_final_reveal(
+    *,
+    drumroll_start_at_ms: int,
+    reveal_at_ms: int,
+    sequence_id: str,
+) -> None:
+    """Lock final votes and persist the synchronized drumroll schedule."""
+    if drumroll_start_at_ms <= 0 or reveal_at_ms <= drumroll_start_at_ms:
+        raise ValueError("Некорректное время раскрытия финала.")
+
+    if not sequence_id.strip():
+        raise ValueError("Не задан идентификатор раскрытия финала.")
+
+    with get_connection() as connection:
+        claimed = connection.execute(
+            """
+            UPDATE game_state
+            SET
+                current_phase = 'final_drumroll',
+                final_locked = 1,
+                final_drumroll_start_at_ms = ?,
+                final_reveal_at_ms = ?,
+                final_reveal_sequence_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1 AND current_phase = 'final_open'
             """,
-            (actual_gender,),
+            (drumroll_start_at_ms, reveal_at_ms, sequence_id),
+        )
+
+        if claimed.rowcount != 1:
+            raise ValueError("Финальный раунд сейчас нельзя раскрыть.")
+
+        connection.execute(
+            """
+            UPDATE final_votes
+            SET locked = 1, updated_at = CURRENT_TIMESTAMP
+            """
         )
 
 
@@ -1478,23 +1434,33 @@ def get_final_vote_for_player(player_id: int) -> dict[str, Any] | None:
 
 
 def reveal_final_round() -> list[dict[str, Any]]:
-    """Reveal final answer and double scores for correct voters."""
-    state = get_game_state()
-
-    if state["current_phase"] != "final_open":
-        raise ValueError("Финальный раунд сейчас не открыт.")
-
-    actual_gender = str(state["actual_gender"])
-
+    """Finalize the scheduled answer and double scores for correct voters once."""
     score_updates: list[dict[str, Any]] = []
 
     with get_connection() as connection:
-        connection.execute(
+        state = connection.execute(
             """
-            UPDATE final_votes
-            SET locked = 1, updated_at = CURRENT_TIMESTAMP
+            SELECT current_phase, actual_gender
+            FROM game_state
+            WHERE id = 1
+            """
+        ).fetchone()
+
+        if state is None or state["current_phase"] != "final_drumroll":
+            raise ValueError("Финальное раскрытие не запланировано или уже выполнено.")
+
+        claimed = connection.execute(
+            """
+            UPDATE game_state
+            SET current_phase = 'final_revealing', updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1 AND current_phase = 'final_drumroll'
             """
         )
+
+        if claimed.rowcount != 1:
+            raise ValueError("Финальное раскрытие уже выполняется.")
+
+        actual_gender = str(state["actual_gender"])
 
         correct_votes = connection.execute(
             """
@@ -1652,9 +1618,7 @@ def submit_baby_name(
         ).fetchone()
 
         if existing_player_name is not None:
-            raise ValueError(
-                "Вы уже предложили имя. Один игрок может предложить только одно имя."
-            )
+            raise ValueError("Вы уже предложили имя. Один игрок может предложить только одно имя.")
 
         existing = connection.execute(
             """
@@ -1815,11 +1779,8 @@ def get_baby_name_winner() -> dict[str, Any] | None:
     return names[0]
 
 
-def reset_game(actual_gender: str) -> None:
+def reset_game() -> None:
     """Reset the whole game, including registered players."""
-    if actual_gender not in {"boy", "girl"}:
-        raise ValueError("Actual gender must be either 'boy' or 'girl'.")
-
     with get_connection() as connection:
         connection.execute("DELETE FROM answers")
         connection.execute("DELETE FROM auction_participants")
@@ -1847,10 +1808,12 @@ def reset_game(actual_gender: str) -> None:
                 question_open = 0,
                 auction_winner_player_id = NULL,
                 final_locked = 0,
-                actual_gender = ?,
+                actual_gender = 'boy',
                 secret_round_open = 0,
+                final_drumroll_start_at_ms = NULL,
+                final_reveal_at_ms = NULL,
+                final_reveal_sequence_id = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
-            """,
-            (actual_gender,),
+            """
         )

@@ -2,22 +2,15 @@ from __future__ import annotations
 
 import base64
 import socket
+import time
+import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import qrcode
 
-from flask import (
-    Flask,
-    abort,
-    jsonify,
-    render_template,
-    request,
-    send_from_directory,
-    session,
-    url_for,
-)
+from flask import Flask, abort, jsonify, render_template, request, send_from_directory, url_for
 from flask_socketio import SocketIO, emit, join_room
 
 from config import Config
@@ -40,6 +33,7 @@ from database import (
     get_player_by_token,
     get_question_by_id,
     init_database,
+    list_auction_participants,
     list_players,
     save_auction_bid,
     save_player_answer,
@@ -47,10 +41,12 @@ from database import (
     set_auction_winner,
     set_current_question,
     set_player_connected,
+    synchronize_player_connections,
     get_final_vote_counts,
     get_final_vote_for_player,
     reveal_final_round,
     save_final_vote,
+    schedule_final_reveal,
     start_final_round,
     get_baby_name_winner,
     list_baby_names,
@@ -66,12 +62,10 @@ app.config.from_object(Config)
 
 DATA_DIR = Path(app.root_path) / "data"
 
-init_database()
-seed_questions()
-
 socketio = SocketIO(
     app,
-    async_mode="threading",
+    cors_allowed_origins="*",
+    async_mode="eventlet",
     ping_interval=5,
     ping_timeout=10,
 )
@@ -79,6 +73,20 @@ socketio = SocketIO(
 
 connected_player_tokens_by_sid: dict[str, str] = {}
 connected_sids_by_player_token: dict[str, set[str]] = {}
+presence_acknowledgements_by_probe: dict[str, set[str]] = {}
+active_final_reveal_sequences: set[str] = set()
+auction_opening_question_ids: set[str] = set()
+
+PRESENCE_PROBE_FIRST_WAIT_SECONDS = 0.8
+PRESENCE_PROBE_SECOND_WAIT_SECONDS = 1.6
+FINAL_DRUMROLL_DURATION_MS = 7_000
+FINAL_SEQUENCE_START_DELAY_MS = 900
+FINAL_REVEAL_BROADCAST_LEAD_MS = 700
+ALLOWED_AUDIO_FILES = {
+    "zvuk-barabannoj-drobi.mp3",
+    "the-sound-of-happy-baby-laughter.mp3",
+    "piano-chord-disturbing.mp3",
+}
 
 
 def get_lan_ip_address() -> str:
@@ -89,7 +97,7 @@ def get_lan_ip_address() -> str:
             return str(probe_socket.getsockname()[0])
     except OSError:
         return socket.gethostbyname(socket.gethostname())
-
+    
 
 def refresh_connected_players_from_socket_registry() -> None:
     """Restore connected=1 for players that currently have active socket sessions."""
@@ -101,6 +109,124 @@ def refresh_connected_players_from_socket_registry() -> None:
 
     for device_token in active_tokens:
         set_player_connected(device_token=device_token, connected=True)
+
+
+def current_time_ms() -> int:
+    """Return current Unix time in milliseconds."""
+    return time.time_ns() // 1_000_000
+
+
+def build_final_schedule_payload(state: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Build synchronized final reveal timing payload from persisted state."""
+    state = state or get_game_state()
+    sequence_id = state.get("final_reveal_sequence_id")
+    drumroll_start_at_ms = state.get("final_drumroll_start_at_ms")
+    reveal_at_ms = state.get("final_reveal_at_ms")
+
+    if not sequence_id or drumroll_start_at_ms is None or reveal_at_ms is None:
+        return None
+
+    return {
+        "sequence_id": str(sequence_id),
+        "drumroll_start_at_ms": int(drumroll_start_at_ms),
+        "reveal_at_ms": int(reveal_at_ms),
+        "drumroll_duration_ms": FINAL_DRUMROLL_DURATION_MS,
+        "server_time_ms": current_time_ms(),
+    }
+
+
+def probe_active_player_tokens() -> set[str]:
+    """Confirm player presence through two invisible client acknowledgements."""
+    probe_id = uuid.uuid4().hex
+    presence_acknowledgements_by_probe[probe_id] = set()
+
+    payload = {
+        "probe_id": probe_id,
+        "server_time_ms": current_time_ms(),
+    }
+
+    socketio.emit("presence_probe", payload)
+    socketio.sleep(PRESENCE_PROBE_FIRST_WAIT_SECONDS)
+
+    socketio.emit("presence_probe", payload)
+    socketio.sleep(PRESENCE_PROBE_SECOND_WAIT_SECONDS)
+
+    return presence_acknowledgements_by_probe.pop(probe_id, set())
+
+
+def complete_scheduled_final_reveal(sequence_id: str, reveal_at_ms: int) -> None:
+    """Finalize scores shortly before the shared visual reveal timestamp."""
+    try:
+        broadcast_at_ms = reveal_at_ms - FINAL_REVEAL_BROADCAST_LEAD_MS
+        delay_seconds = max(0.0, (broadcast_at_ms - current_time_ms()) / 1000)
+        socketio.sleep(delay_seconds)
+
+        state = get_game_state()
+        if (
+            state.get("current_phase") != "final_drumroll"
+            or state.get("final_reveal_sequence_id") != sequence_id
+        ):
+            return
+
+        score_updates = reveal_final_round()
+        players = list_players()
+        counts = get_final_vote_counts()
+
+        socketio.emit(
+            "final_revealed",
+            {
+                "answer": str(state.get("actual_gender") or "boy"),
+                "counts": counts,
+                "score_updates": score_updates,
+                "sequence_id": sequence_id,
+                "reveal_at_ms": reveal_at_ms,
+                "server_time_ms": current_time_ms(),
+            },
+        )
+
+        delay_until_visual_reveal = max(0.0, (reveal_at_ms - current_time_ms()) / 1000)
+        socketio.sleep(delay_until_visual_reveal)
+
+        socketio.emit("rating_updated", {"players": players})
+
+        for score_update in score_updates:
+            socketio.emit(
+                "score_updated",
+                {
+                    "player_id": score_update["player_id"],
+                    "score": score_update["score"],
+                    "points_delta": score_update["points_delta"],
+                    "is_correct": True,
+                    "effective_at_ms": reveal_at_ms,
+                },
+            )
+    finally:
+        active_final_reveal_sequences.discard(sequence_id)
+
+
+def ensure_final_reveal_task(state: dict[str, Any] | None = None) -> None:
+    """Start or restore the background task for a pending final reveal."""
+    state = state or get_game_state()
+
+    if state.get("current_phase") != "final_drumroll":
+        return
+
+    sequence_id = state.get("final_reveal_sequence_id")
+    reveal_at_ms = state.get("final_reveal_at_ms")
+
+    if not sequence_id or reveal_at_ms is None:
+        return
+
+    normalized_sequence_id = str(sequence_id)
+    if normalized_sequence_id in active_final_reveal_sequences:
+        return
+
+    active_final_reveal_sequences.add(normalized_sequence_id)
+    socketio.start_background_task(
+        complete_scheduled_final_reveal,
+        normalized_sequence_id,
+        int(reveal_at_ms),
+    )
 
 
 def build_current_question_payload() -> dict[str, Any] | None:
@@ -133,13 +259,18 @@ def build_current_question_payload() -> dict[str, Any] | None:
 
 
 def build_auction_public_payload(question_id: str) -> dict[str, Any]:
-    """Build public auction payload."""
+    """Build public auction payload including the immutable participant snapshot."""
     progress = get_auction_progress(question_id)
+    participants = list_auction_participants(question_id)
 
     return {
         "question_id": question_id,
         "participants_count": progress["participants_count"],
         "bids_count": progress["bids_count"],
+        "participant_player_ids": [
+            int(participant["id"])
+            for participant in participants
+        ],
     }
 
 
@@ -148,10 +279,16 @@ def question_image(filename: str) -> Any:
     """Serve JPG question images stored in the data directory."""
     image_path = Path(filename)
 
-    if image_path.name != filename or image_path.suffix.lower() not in {
-        ".jpg",
-        ".jpeg",
-    }:
+    if image_path.name != filename or image_path.suffix.lower() not in {".jpg", ".jpeg"}:
+        abort(404)
+
+    return send_from_directory(DATA_DIR, filename, max_age=3600)
+
+
+@app.get("/game-audio/<path:filename>")
+def game_audio(filename: str) -> Any:
+    """Serve only the three configured MP3 files from the data directory."""
+    if Path(filename).name != filename or filename not in ALLOWED_AUDIO_FILES:
         abort(404)
 
     return send_from_directory(DATA_DIR, filename, max_age=3600)
@@ -163,10 +300,9 @@ def player_page() -> str:
     return render_template("player.html")
 
 
-@app.get(f"/{Config.ADMIN_SECRET_PATH}")
+@app.get("/admin-secret-2026")
 def admin_page() -> str:
-    """Render admin screen by configured secret URL."""
-    session["is_admin"] = True
+    """Render admin screen by secret URL."""
     return render_template("admin.html")
 
 
@@ -174,21 +310,6 @@ def admin_page() -> str:
 def blocked_admin_page() -> None:
     """Block obvious admin URL."""
     abort(404)
-
-
-@app.before_request
-def protect_admin_api() -> Any | None:
-    """Allow admin API calls only after opening the secret admin page."""
-    if request.path.startswith("/api/admin/") and not session.get("is_admin"):
-        return jsonify(
-            {
-                "ok": False,
-                "error": "admin_access_required",
-                "message": "Сначала откройте секретную страницу администратора.",
-            }
-        ), 403
-
-    return None
 
 
 @app.get("/api/player")
@@ -326,10 +447,14 @@ def api_admin_board() -> Any:
 @app.post("/api/admin/game/reset")
 def api_reset_game() -> Any:
     """Reset game progress."""
-    reset_game(Config.ACTUAL_GENDER)
+    reset_game()
+
 
     connected_player_tokens_by_sid.clear()
     connected_sids_by_player_token.clear()
+    presence_acknowledgements_by_probe.clear()
+    auction_opening_question_ids.clear()
+    active_final_reveal_sequences.clear()
 
     board = build_admin_board()
     players = list_players()
@@ -402,45 +527,60 @@ def api_open_question(question_id: str) -> Any:
         ), 409
 
     if question["is_auction"]:
-        refresh_connected_players_from_socket_registry()
-        participants = create_auction_snapshot(question_id)
-
-        socketio.emit(
-            "rating_updated",
-            {
-                "players": list_players(),
-            },
-        )
-
-        if not participants:
+        if question_id in auction_opening_question_ids:
             return jsonify(
                 {
                     "ok": False,
-                    "error": "no_auction_participants",
-                    "message": "Аукцион нельзя начать: нет активных игроков с положительным рейтингом.",
+                    "error": "auction_presence_check_in_progress",
+                    "message": "Проверка подключения игроков уже выполняется.",
                 }
             ), 409
 
-        set_current_question(question_id, phase="auction_bidding")
+        auction_opening_question_ids.add(question_id)
 
-        auction_payload = build_auction_public_payload(question_id)
-        question_payload = build_current_question_payload()
+        try:
+            confirmed_tokens = probe_active_player_tokens()
+            synchronize_player_connections(confirmed_tokens)
+            participants = create_auction_snapshot(question_id)
+            players = list_players()
 
-        socketio.emit(
-            "auction_started",
-            {
-                "auction": auction_payload,
-            },
-        )
+            socketio.emit("rating_updated", {"players": players})
 
-        return jsonify(
-            {
-                "ok": True,
-                "question": question_payload,
-                "auction": auction_payload,
-                "participants": participants,
-            }
-        )
+            if not participants:
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": "no_auction_participants",
+                        "message": (
+                            "Аукцион нельзя начать: ни один подключённый игрок "
+                            "с положительным рейтингом не подтвердил связь."
+                        ),
+                    }
+                ), 409
+
+            set_current_question(question_id, phase="auction_bidding")
+
+            auction_payload = build_auction_public_payload(question_id)
+            question_payload = build_current_question_payload()
+
+            socketio.emit(
+                "auction_started",
+                {
+                    "auction": auction_payload,
+                    "participants": participants,
+                },
+            )
+
+            return jsonify(
+                {
+                    "ok": True,
+                    "question": question_payload,
+                    "auction": auction_payload,
+                    "participants": participants,
+                }
+            )
+        finally:
+            auction_opening_question_ids.discard(question_id)
 
     set_current_question(question_id)
 
@@ -621,7 +761,7 @@ def api_save_player_answer() -> Any:
                 "message": "Вопрос уже закрыт или не открыт.",
             }
         ), 409
-
+    
     if state["current_phase"] == "auction_bidding":
         return jsonify(
             {
@@ -724,10 +864,7 @@ def api_save_auction_bid() -> Any:
 
     state = get_game_state()
 
-    if (
-        state["current_phase"] != "auction_bidding"
-        or state["current_question_id"] != question_id
-    ):
+    if state["current_phase"] != "auction_bidding" or state["current_question_id"] != question_id:
         return jsonify(
             {
                 "ok": False,
@@ -847,7 +984,7 @@ def api_start_final_round() -> Any:
             }
         ), 409
 
-    start_final_round(Config.ACTUAL_GENDER)
+    start_final_round()
 
     counts = get_final_vote_counts()
 
@@ -928,9 +1065,40 @@ def api_save_final_vote() -> Any:
 
 @app.post("/api/admin/final/reveal")
 def api_reveal_final_round() -> Any:
-    """Reveal final round answer."""
+    """Schedule one synchronized seven-second final reveal sequence."""
+    state = get_game_state()
+
+    if state["current_phase"] == "final_drumroll":
+        schedule_payload = build_final_schedule_payload(state)
+        ensure_final_reveal_task(state)
+
+        return jsonify(
+            {
+                "ok": True,
+                "already_scheduled": True,
+                "schedule": schedule_payload,
+            }
+        )
+
+    if state["current_phase"] != "final_open":
+        return jsonify(
+            {
+                "ok": False,
+                "error": "invalid_final_reveal",
+                "message": "Финальный раунд сейчас нельзя раскрыть.",
+            }
+        ), 409
+
+    sequence_id = uuid.uuid4().hex
+    drumroll_start_at_ms = current_time_ms() + FINAL_SEQUENCE_START_DELAY_MS
+    reveal_at_ms = drumroll_start_at_ms + FINAL_DRUMROLL_DURATION_MS
+
     try:
-        score_updates = reveal_final_round()
+        schedule_final_reveal(
+            drumroll_start_at_ms=drumroll_start_at_ms,
+            reveal_at_ms=reveal_at_ms,
+            sequence_id=sequence_id,
+        )
     except ValueError as error:
         return jsonify(
             {
@@ -940,44 +1108,23 @@ def api_reveal_final_round() -> Any:
             }
         ), 409
 
-    players = list_players()
-    counts = get_final_vote_counts()
-    actual_gender = str(get_game_state()["actual_gender"])
+    state = get_game_state()
+    schedule_payload = build_final_schedule_payload(state)
 
     socketio.emit(
-        "final_revealed",
+        "final_reveal_scheduled",
         {
-            "answer": actual_gender,
-            "counts": counts,
-            "score_updates": score_updates,
+            "schedule": schedule_payload,
         },
     )
 
-    socketio.emit(
-        "rating_updated",
-        {
-            "players": players,
-        },
-    )
-
-    for score_update in score_updates:
-        socketio.emit(
-            "score_updated",
-            {
-                "player_id": score_update["player_id"],
-                "score": score_update["score"],
-                "points_delta": score_update["points_delta"],
-                "is_correct": True,
-            },
-        )
+    ensure_final_reveal_task(state)
 
     return jsonify(
         {
             "ok": True,
-            "answer": actual_gender,
-            "counts": counts,
-            "players": players,
-            "score_updates": score_updates,
+            "already_scheduled": False,
+            "schedule": schedule_payload,
         }
     )
 
@@ -986,6 +1133,41 @@ def api_reveal_final_round() -> Any:
 def handle_connect() -> None:
     """Handle socket connection."""
     emit("server_message", {"message": "Подключение к серверу установлено"})
+
+
+@socketio.on("time_sync_request")
+def handle_time_sync_request(data: dict[str, Any] | None = None) -> None:
+    """Return server time while echoing the client's send timestamp."""
+    payload = data or {}
+    emit(
+        "time_sync_response",
+        {
+            "client_sent_at_ms": payload.get("client_sent_at_ms"),
+            "server_time_ms": current_time_ms(),
+        },
+    )
+
+
+@socketio.on("presence_ack")
+def handle_presence_ack(data: dict[str, Any] | None = None) -> None:
+    """Record an invisible presence acknowledgement for an active auction probe."""
+    payload = data or {}
+    probe_id = str(payload.get("probe_id", "")).strip()
+    device_token = str(payload.get("device_token", "")).strip()
+
+    if not probe_id or not device_token:
+        return
+
+    acknowledgements = presence_acknowledgements_by_probe.get(probe_id)
+    if acknowledgements is None:
+        return
+
+    player = get_player_by_token(device_token)
+    if player is None:
+        return
+
+    acknowledgements.add(device_token)
+    set_player_connected(device_token=device_token, connected=True)
 
 
 @socketio.on("player_identify")
@@ -1078,30 +1260,28 @@ def handle_admin_request_board() -> None:
 
 @app.get("/api/game-state")
 def api_game_state() -> Any:
-    """Return current game state for reconnects."""
+    """Return current game state and synchronized timing for reconnects."""
     device_token = request.args.get("device_token", "").strip()
 
     state = get_game_state()
-    question_payload = build_current_question_payload()
+    ensure_final_reveal_task(state)
 
-    player = None
+    question_payload = build_current_question_payload()
+    final_schedule = build_final_schedule_payload(state)
+
+    player = get_player_by_token(device_token) if device_token else None
     player_answer = None
     auction_bid = None
     auction = None
     auction_winner = None
     final_vote = None
     final_counts = None
+    final_result = None
     baby_names = None
 
-    if device_token:
-        player = get_player_by_token(device_token)
-
     if question_payload is not None:
-        auction = (
-            build_auction_public_payload(question_payload["id"])
-            if question_payload["is_auction"]
-            else None
-        )
+        if question_payload["is_auction"]:
+            auction = build_auction_public_payload(question_payload["id"])
 
         if player is not None:
             player_answer = get_answer_for_player(
@@ -1125,11 +1305,25 @@ def api_game_state() -> Any:
                     "bid": winner["bid"],
                 }
 
-    if state["current_phase"] in {"final_open", "final_revealed"}:
+    if state["current_phase"] in {
+        "final_open",
+        "final_drumroll",
+        "final_revealing",
+        "final_revealed",
+    }:
         final_counts = get_final_vote_counts()
 
         if player is not None:
             final_vote = get_final_vote_for_player(int(player["id"]))
+
+            if state["current_phase"] == "final_revealed":
+                final_result = {
+                    "is_correct": bool(
+                        final_vote
+                        and final_vote.get("choice") == state.get("actual_gender")
+                    ),
+                    "score": int(player["score"]),
+                }
 
     if state["current_phase"] == "secret_names":
         baby_names = list_baby_names()
@@ -1137,6 +1331,7 @@ def api_game_state() -> Any:
     return jsonify(
         {
             "ok": True,
+            "server_time_ms": current_time_ms(),
             "state": {
                 "current_phase": state["current_phase"],
                 "question_open": bool(state["question_open"]),
@@ -1152,6 +1347,8 @@ def api_game_state() -> Any:
             "auction_winner": auction_winner,
             "final_vote": final_vote,
             "final_counts": final_counts,
+            "final_schedule": final_schedule,
+            "final_result": final_result,
             "baby_names": baby_names,
         }
     )
@@ -1377,10 +1574,12 @@ def handle_disconnect() -> None:
 
 
 if __name__ == "__main__":
+    init_database()
+    seed_questions()
+
     socketio.run(
         app,
         host=Config.HOST,
         port=Config.PORT,
         debug=Config.DEBUG,
-        allow_unsafe_werkzeug=True,
     )
