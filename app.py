@@ -10,7 +10,15 @@ from typing import Any
 
 import qrcode
 
-from flask import Flask, abort, jsonify, render_template, request, send_from_directory, url_for
+from flask import (
+    Flask,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 from flask_socketio import SocketIO, emit, join_room
 
 from config import Config
@@ -97,7 +105,7 @@ def get_lan_ip_address() -> str:
             return str(probe_socket.getsockname()[0])
     except OSError:
         return socket.gethostbyname(socket.gethostname())
-    
+
 
 def refresh_connected_players_from_socket_registry() -> None:
     """Restore connected=1 for players that currently have active socket sessions."""
@@ -116,7 +124,9 @@ def current_time_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
-def build_final_schedule_payload(state: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def build_final_schedule_payload(
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Build synchronized final reveal timing payload from persisted state."""
     state = state or get_game_state()
     sequence_id = state.get("final_reveal_sequence_id")
@@ -268,8 +278,7 @@ def build_auction_public_payload(question_id: str) -> dict[str, Any]:
         "participants_count": progress["participants_count"],
         "bids_count": progress["bids_count"],
         "participant_player_ids": [
-            int(participant["id"])
-            for participant in participants
+            int(participant["id"]) for participant in participants
         ],
     }
 
@@ -279,7 +288,10 @@ def question_image(filename: str) -> Any:
     """Serve JPG question images stored in the data directory."""
     image_path = Path(filename)
 
-    if image_path.name != filename or image_path.suffix.lower() not in {".jpg", ".jpeg"}:
+    if image_path.name != filename or image_path.suffix.lower() not in {
+        ".jpg",
+        ".jpeg",
+    }:
         abort(404)
 
     return send_from_directory(DATA_DIR, filename, max_age=3600)
@@ -448,7 +460,6 @@ def api_admin_board() -> Any:
 def api_reset_game() -> Any:
     """Reset game progress."""
     reset_game()
-
 
     connected_player_tokens_by_sid.clear()
     connected_sids_by_player_token.clear()
@@ -761,7 +772,7 @@ def api_save_player_answer() -> Any:
                 "message": "Вопрос уже закрыт или не открыт.",
             }
         ), 409
-    
+
     if state["current_phase"] == "auction_bidding":
         return jsonify(
             {
@@ -864,7 +875,10 @@ def api_save_auction_bid() -> Any:
 
     state = get_game_state()
 
-    if state["current_phase"] != "auction_bidding" or state["current_question_id"] != question_id:
+    if (
+        state["current_phase"] != "auction_bidding"
+        or state["current_question_id"] != question_id
+    ):
         return jsonify(
             {
                 "ok": False,

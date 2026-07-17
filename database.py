@@ -432,6 +432,7 @@ def list_players() -> list[dict[str, Any]]:
 
     return [dict(row) for row in rows]
 
+
 def load_questions_from_json() -> list[dict[str, Any]]:
     """Load questions from JSON file."""
     if not QUESTIONS_PATH.exists():
@@ -776,8 +777,7 @@ def is_answer_correct(
     normalized_player_answer = normalize_answer(player_answer)
 
     normalized_correct_answers = {
-        normalize_answer(correct_answer)
-        for correct_answer in correct_answers
+        normalize_answer(correct_answer) for correct_answer in correct_answers
     }
 
     return normalized_player_answer in normalized_correct_answers
@@ -880,7 +880,9 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
 
         for answer in answers:
             correct = normalize_answer(answer["answer"]) in normalized_correct_answers
-            points_delta = int(question["points"]) if correct else -int(question["points"])
+            points_delta = (
+                int(question["points"]) if correct else -int(question["points"])
+            )
 
             connection.execute(
                 """
@@ -958,6 +960,7 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
 
     return score_updates
 
+
 def list_active_players() -> list[dict[str, Any]]:
     """Return connected players who can participate in auction."""
     with get_connection() as connection:
@@ -996,10 +999,7 @@ def create_auction_snapshot(question_id: str) -> list[dict[str, Any]]:
             )
             VALUES (?, ?)
             """,
-            [
-                (question_id, int(player["id"]))
-                for player in active_players
-            ],
+            [(question_id, int(player["id"])) for player in active_players],
         )
 
     return active_players
@@ -1224,7 +1224,9 @@ def set_auction_winner(
     )
 
 
-def close_auction_question_and_calculate_score(question_id: str) -> list[dict[str, Any]]:
+def close_auction_question_and_calculate_score(
+    question_id: str,
+) -> list[dict[str, Any]]:
     """Close auction question and calculate winner score by bid."""
     state = get_game_state()
     winner_player_id = state.get("auction_winner_player_id")
@@ -1288,6 +1290,7 @@ def close_auction_question_and_calculate_score(question_id: str) -> list[dict[st
     clear_current_question()
 
     return score_updates
+
 
 def start_final_round() -> None:
     """Start final gender voting round."""
@@ -1618,7 +1621,9 @@ def submit_baby_name(
         ).fetchone()
 
         if existing_player_name is not None:
-            raise ValueError("Вы уже предложили имя. Один игрок может предложить только одно имя.")
+            raise ValueError(
+                "Вы уже предложили имя. Один игрок может предложить только одно имя."
+            )
 
         existing = connection.execute(
             """
