@@ -18,9 +18,10 @@ const playerAnswerArea = document.getElementById("player-answer-area");
 const playerAnswerStatus = document.getElementById("player-answer-status");
 
 const finalState = document.getElementById("final-state");
-const finalBoyButton = document.getElementById("final-boy-button");
-const finalGirlButton = document.getElementById("final-girl-button");
-const finalPlayerStatus = document.getElementById("final-player-status");
+const initialFinalStateMarkup = finalState ? finalState.innerHTML : "";
+let finalBoyButton = document.getElementById("final-boy-button");
+let finalGirlButton = document.getElementById("final-girl-button");
+let finalPlayerStatus = document.getElementById("final-player-status");
 
 const secretState = document.getElementById("secret-state");
 const babyNameForm = document.getElementById("baby-name-form");
@@ -34,6 +35,40 @@ let selectedAnswer = null;
 let lastResultTimeoutId = null;
 let currentAuction = null;
 let auctionWinner = null;
+let activeFinalSequenceId = null;
+let finalDrumrollTimeoutId = null;
+let finalRevealTimeoutId = null;
+
+function getServerNowMs() {
+  if (typeof window.getSynchronizedServerTimeMs === "function") {
+    return window.getSynchronizedServerTimeMs();
+  }
+
+  return Date.now();
+}
+
+function scheduleForServerTime(targetServerTimeMs, callback) {
+  if (typeof window.scheduleAtServerTime === "function") {
+    return window.scheduleAtServerTime(targetServerTimeMs, callback);
+  }
+
+  return window.setTimeout(
+    callback,
+    Math.max(0, Number(targetServerTimeMs) - Date.now()),
+  );
+}
+
+function clearFinalSequenceTimers() {
+  if (finalDrumrollTimeoutId !== null) {
+    window.clearTimeout(finalDrumrollTimeoutId);
+    finalDrumrollTimeoutId = null;
+  }
+
+  if (finalRevealTimeoutId !== null) {
+    window.clearTimeout(finalRevealTimeoutId);
+    finalRevealTimeoutId = null;
+  }
+}
 
 function createDeviceToken() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -95,6 +130,8 @@ function showWaitingState() {
   selectedAnswer = null;
   currentAuction = null;
   auctionWinner = null;
+  activeFinalSequenceId = null;
+  clearFinalSequenceTimers();
 
   waitingState.classList.remove("hidden");
   questionState.classList.add("hidden");
@@ -177,7 +214,7 @@ function showQuestionState(question, savedAnswer = null, extra = {}) {
   if (question.is_auction && extra.mode === "bid") {
     renderPlayerQuestionImage(null);
     playerQuestionTitle.textContent = "АУКЦИОН";
-    renderAuctionBidForm(extra.auctionBid || null);
+    renderAuctionBidForm(extra.auctionBid || null, extra.auction || null);
     return;
   }
 
@@ -208,9 +245,44 @@ function showQuestionState(question, savedAnswer = null, extra = {}) {
   renderTextAnswer();
 }
 
+function bindFinalVoteButtons() {
+  if (finalBoyButton && finalBoyButton.dataset.voteHandlerBound !== "1") {
+    finalBoyButton.dataset.voteHandlerBound = "1";
+    finalBoyButton.addEventListener("click", () => {
+      submitFinalVote("boy");
+    });
+  }
+
+  if (finalGirlButton && finalGirlButton.dataset.voteHandlerBound !== "1") {
+    finalGirlButton.dataset.voteHandlerBound = "1";
+    finalGirlButton.addEventListener("click", () => {
+      submitFinalVote("girl");
+    });
+  }
+}
+
+function restoreFinalChoiceMarkup() {
+  if (!finalState) {
+    return;
+  }
+
+  if (!finalState.querySelector("#final-boy-button")) {
+    finalState.innerHTML = initialFinalStateMarkup;
+  }
+
+  finalBoyButton = document.getElementById("final-boy-button");
+  finalGirlButton = document.getElementById("final-girl-button");
+  finalPlayerStatus = document.getElementById("final-player-status");
+  bindFinalVoteButtons();
+}
+
 function showFinalState(savedVote = null) {
+  restoreFinalChoiceMarkup();
+
   currentQuestion = null;
   selectedAnswer = null;
+  activeFinalSequenceId = null;
+  clearFinalSequenceTimers();
 
   waitingState.classList.add("hidden");
   questionState.classList.add("hidden");
@@ -262,7 +334,10 @@ function showFinalDrumrollForPlayer() {
   waitingState.classList.add("hidden");
   questionState.classList.add("hidden");
   finalState.classList.remove("hidden");
-  
+
+  if (secretState) {
+    secretState.classList.add("hidden");
+  }
 
   finalState.innerHTML = `
     <div class="final-player-reveal drumroll">
@@ -271,26 +346,39 @@ function showFinalDrumrollForPlayer() {
   `;
 }
 
-function showFinalRevealForPlayer(scoreUpdates = [], actualGender = "boy") {
+function showFinalRevealForPlayer(
+  scoreUpdates = [],
+  finalResult = null,
+  answer = "boy",
+) {
   const myUpdate = currentPlayer
-    ? scoreUpdates.find((item) => item.player_id === currentPlayer.id)
+    ? scoreUpdates.find((item) => Number(item.player_id) === Number(currentPlayer.id))
     : null;
 
-  if (myUpdate) {
-    currentPlayer.score = myUpdate.score;
-    playerScore.textContent = String(myUpdate.score);
+  const resultingScore = myUpdate
+    ? Number(myUpdate.score)
+    : finalResult && Number.isFinite(Number(finalResult.score))
+      ? Number(finalResult.score)
+      : null;
+
+  if (currentPlayer && resultingScore !== null) {
+    currentPlayer.score = resultingScore;
+    playerScore.textContent = String(resultingScore);
   }
 
-  const isGirl = actualGender === "girl";
-  const answerLabel = isGirl ? "девочка" : "мальчик";
-  const answerTitle = isGirl ? "ДЕВОЧКА!" : "МАЛЬЧИК!";
+  const isCorrect = myUpdate
+    ? true
+    : Boolean(finalResult && finalResult.is_correct);
 
-  const resultText = myUpdate
-    ? `Вы угадали! Ваши баллы удвоены: ${myUpdate.score}`
+  const answerLabel = answer === "girl" ? "девочка" : "мальчик";
+  const answerTitle = answer === "girl" ? "ДЕВОЧКА!" : "МАЛЬЧИК!";
+
+  const resultText = isCorrect && resultingScore !== null
+    ? `Вы угадали! Ваши баллы удвоены: ${resultingScore}`
     : `Ответ: ${answerLabel}! Ваши баллы не изменились.`;
 
   finalState.innerHTML = `
-    <div class="final-player-reveal ${isGirl ? "girl" : "boy"}">
+    <div class="final-player-reveal ${answer === "girl" ? "girl" : "boy"}">
       <p>Это</p>
       <strong>${answerTitle}</strong>
       <span>${resultText}</span>
@@ -302,6 +390,65 @@ function showFinalRevealForPlayer(scoreUpdates = [], actualGender = "boy") {
   }
 }
 
+function scheduleFinalDrumrollForPlayer(schedule) {
+  if (!schedule || !schedule.sequence_id) {
+    return;
+  }
+
+  const sequenceId = String(schedule.sequence_id);
+  const drumrollStartAtMs = Number(schedule.drumroll_start_at_ms);
+
+  if (!Number.isFinite(drumrollStartAtMs)) {
+    return;
+  }
+
+  if (activeFinalSequenceId !== sequenceId) {
+    clearFinalSequenceTimers();
+    activeFinalSequenceId = sequenceId;
+  }
+
+  if (getServerNowMs() >= drumrollStartAtMs) {
+    showFinalDrumrollForPlayer();
+    return;
+  }
+
+  if (finalDrumrollTimeoutId !== null) {
+    return;
+  }
+
+  finalDrumrollTimeoutId = scheduleForServerTime(drumrollStartAtMs, () => {
+    finalDrumrollTimeoutId = null;
+    showFinalDrumrollForPlayer();
+  });
+}
+
+function scheduleFinalRevealForPlayer(data, finalResult = null) {
+  const sequenceId = String(data.sequence_id || activeFinalSequenceId || "");
+  const revealAtMs = Number(data.reveal_at_ms);
+  const answer = data.answer || "boy";
+  const scoreUpdates = data.score_updates || [];
+
+  if (activeFinalSequenceId && sequenceId && activeFinalSequenceId !== sequenceId) {
+    return;
+  }
+
+  activeFinalSequenceId = sequenceId || activeFinalSequenceId;
+
+  if (!Number.isFinite(revealAtMs)) {
+    showFinalRevealForPlayer(scoreUpdates, finalResult, answer);
+    return;
+  }
+
+  if (finalRevealTimeoutId !== null) {
+    window.clearTimeout(finalRevealTimeoutId);
+  }
+
+  finalRevealTimeoutId = scheduleForServerTime(revealAtMs, () => {
+    finalRevealTimeoutId = null;
+    showFinalRevealForPlayer(scoreUpdates, finalResult, answer);
+  });
+}
+
 // function renderAuctionPlaceholder() {
 //   playerAnswerArea.innerHTML = `
 //     <div class="auction-player-card">
@@ -311,8 +458,13 @@ function showFinalRevealForPlayer(scoreUpdates = [], actualGender = "boy") {
 //   `;
 // }
 
-function renderAuctionBidForm(existingBid = null) {
+function renderAuctionBidForm(existingBid = null, auction = currentAuction) {
   const playerScoreValue = currentPlayer ? Number(currentPlayer.score) : 0;
+  const participantPlayerIds = auction && Array.isArray(auction.participant_player_ids)
+    ? auction.participant_player_ids.map(Number)
+    : null;
+  const isConfirmedParticipant = !participantPlayerIds
+    || (currentPlayer && participantPlayerIds.includes(Number(currentPlayer.id)));
 
   if (existingBid) {
     playerAnswerArea.innerHTML = `
@@ -333,6 +485,17 @@ function renderAuctionBidForm(existingBid = null) {
         <p>Вы не участвуете в этом аукционе, потому что для ставки нужны положительные баллы.</p>
         <p>Ожидаем завершения ставок других игроков...</p>
         </div>
+    `;
+    playerAnswerStatus.textContent = "";
+    return;
+  }
+
+  if (!isConfirmedParticipant) {
+    playerAnswerArea.innerHTML = `
+      <div class="auction-player-card">
+        <p>Перед началом аукциона устройство не подтвердило активное подключение.</p>
+        <p>В этом аукционе ставка недоступна. Не закрывайте страницу перед следующим аукционом.</p>
+      </div>
     `;
     playerAnswerStatus.textContent = "";
     return;
@@ -591,7 +754,7 @@ async function submitAuctionBid(bid) {
 
   renderAuctionBidForm({
     bid,
-  });
+  }, currentAuction);
 }
 
 function renderChoiceAnswers(options) {
@@ -731,17 +894,7 @@ async function createPlayer(deviceToken, nickname) {
   return data.player;
 }
 
-if (finalBoyButton) {
-  finalBoyButton.addEventListener("click", () => {
-    submitFinalVote("boy");
-  });
-}
-
-if (finalGirlButton) {
-  finalGirlButton.addEventListener("click", () => {
-    submitFinalVote("girl");
-  });
-}
+bindFinalVoteButtons();
 
 if (babyNameForm) {
   babyNameForm.addEventListener("submit", async (event) => {
@@ -756,6 +909,82 @@ if (babyNameForm) {
 
     await submitBabyName(name);
   });
+}
+
+function applyGameState(gameState) {
+  const phase = gameState.state.current_phase;
+
+  if (phase === "secret_names") {
+    showSecretState(gameState.baby_names || []);
+    return;
+  }
+
+  if (phase === "final_open") {
+    showFinalState(gameState.final_vote);
+    return;
+  }
+
+  if (phase === "final_drumroll" || phase === "final_revealing") {
+    scheduleFinalDrumrollForPlayer(gameState.final_schedule);
+    return;
+  }
+
+  if (phase === "final_revealed") {
+    const schedule = gameState.final_schedule;
+    const revealAtMs = Number(schedule && schedule.reveal_at_ms);
+    const revealData = {
+      answer: gameState.state.actual_gender || "boy",
+      sequence_id: schedule && schedule.sequence_id,
+      reveal_at_ms: revealAtMs,
+      score_updates: [],
+    };
+
+    if (Number.isFinite(revealAtMs) && getServerNowMs() < revealAtMs) {
+      scheduleFinalDrumrollForPlayer(schedule);
+      scheduleFinalRevealForPlayer(revealData, gameState.final_result);
+    } else {
+      showFinalRevealForPlayer(
+        [],
+        gameState.final_result,
+        gameState.state.actual_gender || "boy",
+      );
+    }
+    return;
+  }
+
+  if (gameState.question) {
+    if (phase === "auction_bidding") {
+      showQuestionState(gameState.question, null, {
+        mode: "bid",
+        auction: gameState.auction,
+        auctionBid: gameState.auction_bid,
+      });
+      return;
+    }
+
+    if (phase === "auction_question") {
+      if (
+        currentPlayer
+        && Number(gameState.state.auction_winner_player_id) === Number(currentPlayer.id)
+      ) {
+        showQuestionState(gameState.question, gameState.player_answer, {
+          mode: "winner_question",
+          auctionWinner: gameState.auction_winner,
+        });
+      } else {
+        showQuestionState(gameState.question, null, {
+          mode: "wait_winner",
+          winner: gameState.auction_winner,
+        });
+      }
+      return;
+    }
+
+    showQuestionState(gameState.question, gameState.player_answer);
+    return;
+  }
+
+  showWaitingState();
 }
 
 async function initializePlayer() {
@@ -773,41 +1002,7 @@ async function initializePlayer() {
 
       const gameState = await fetchGameState(deviceToken);
 
-      if (gameState.state.current_phase === "secret_names") {
-        showSecretState(gameState.baby_names || []);
-      } else if (gameState.state.current_phase === "final_open") {
-        showFinalState(gameState.final_vote);
-      } else if (gameState.state.current_phase === "final_revealed") {
-        showFinalState(gameState.final_vote);
-        showFinalRevealForPlayer([], gameState.state.actual_gender);
-      } else if (gameState.question) {
-        if (gameState.state.current_phase === "auction_bidding") {
-          showQuestionState(gameState.question, null, {
-            mode: "bid",
-            auction: gameState.auction,
-            auctionBid: gameState.auction_bid,
-          });
-        } else if (gameState.state.current_phase === "auction_question") {
-          if (
-            currentPlayer
-            && gameState.state.auction_winner_player_id === currentPlayer.id
-          ) {
-            showQuestionState(gameState.question, gameState.player_answer, {
-              mode: "winner_question",
-              auctionWinner: gameState.auction_winner,
-            });
-          } else {
-            showQuestionState(gameState.question, null, {
-              mode: "wait_winner",
-              winner: gameState.auction_winner,
-            });
-          }
-        } else {
-          showQuestionState(gameState.question, gameState.player_answer);
-        }
-      } else {
-        showWaitingState();
-      }
+      applyGameState(gameState);
 
       return;
     }
@@ -843,47 +1038,39 @@ if (nicknameForm) {
 
       const gameState = await fetchGameState(deviceToken);
 
-      if (gameState.state.current_phase === "secret_names") {
-        showSecretState(gameState.baby_names || []);
-      } else if (gameState.state.current_phase === "final_open") {
-        showFinalState(gameState.final_vote);
-      } else if (gameState.state.current_phase === "final_revealed") {
-        showFinalState(gameState.final_vote);
-        showFinalRevealForPlayer([], gameState.state.actual_gender);
-      } else if (gameState.question) {
-        if (gameState.state.current_phase === "auction_bidding") {
-          showQuestionState(gameState.question, null, {
-            mode: "bid",
-            auction: gameState.auction,
-            auctionBid: gameState.auction_bid,
-          });
-        } else if (gameState.state.current_phase === "auction_question") {
-          if (
-            currentPlayer
-            && gameState.state.auction_winner_player_id === currentPlayer.id
-          ) {
-            showQuestionState(gameState.question, gameState.player_answer, {
-              mode: "winner_question",
-              auctionWinner: gameState.auction_winner,
-            });
-          } else {
-            showQuestionState(gameState.question, null, {
-              mode: "wait_winner",
-              winner: gameState.auction_winner,
-            });
-          }
-        } else {
-          showQuestionState(gameState.question, gameState.player_answer);
-        }
-      } else {
-        showWaitingState();
-      }
+      applyGameState(gameState);
 
     } catch (error) {
       showNicknameError(error.message);
     }
   });
 }
+
+socket.on("connect", () => {
+  const deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY);
+
+  if (!deviceToken) {
+    return;
+  }
+
+  socket.emit("player_identify", {
+    device_token: deviceToken,
+  });
+});
+
+socket.on("presence_probe", (data) => {
+  const probeId = data && data.probe_id;
+  const deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY);
+
+  if (!probeId || !deviceToken) {
+    return;
+  }
+
+  socket.emit("presence_ack", {
+    probe_id: probeId,
+    device_token: deviceToken,
+  });
+});
 
 socket.on("player_identified", (data) => {
   if (!data.ok) {
@@ -1012,12 +1199,16 @@ socket.on("final_started", () => {
   showFinalState();
 });
 
-socket.on("final_revealed", (data) => {
-  showFinalDrumrollForPlayer();
+socket.on("final_reveal_scheduled", (data) => {
+  if (!currentPlayer) {
+    return;
+  }
 
-  window.setTimeout(() => {
-    showFinalRevealForPlayer(data.score_updates || [], data.answer);
-  }, 2000);
+  scheduleFinalDrumrollForPlayer(data.schedule);
+});
+
+socket.on("final_revealed", (data) => {
+  scheduleFinalRevealForPlayer(data);
 });
 
 socket.on("secret_started", (data) => {
@@ -1043,6 +1234,8 @@ socket.on("game_reset", () => {
   selectedAnswer = null;
   currentAuction = null;
   auctionWinner = null;
+  activeFinalSequenceId = null;
+  clearFinalSequenceTimers();
 
   showWaitingState();
   showNicknameView();
