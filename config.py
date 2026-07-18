@@ -19,6 +19,14 @@ class Config:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "5000"))
     DEBUG: bool = os.getenv("DEBUG", "0") == "1"
+    SOCKETIO_ASYNC_MODE: str = (
+        os.getenv(
+            "SOCKETIO_ASYNC_MODE",
+            "eventlet",
+        )
+        .strip()
+        .lower()
+    )
 
 
 if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", Config.ADMIN_SECRET_PATH):
@@ -29,3 +37,6 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", Config.ADMIN_SECRET_PATH):
 
 if Config.ACTUAL_GENDER not in {"boy", "girl"}:
     raise ValueError("ACTUAL_GENDER must be either 'boy' or 'girl'.")
+
+if Config.SOCKETIO_ASYNC_MODE not in {"eventlet", "threading"}:
+    raise ValueError("SOCKETIO_ASYNC_MODE must be either 'eventlet' or 'threading'.")

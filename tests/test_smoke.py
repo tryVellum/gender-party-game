@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("ACTUAL_GENDER", "girl")
 os.environ.setdefault("ADMIN_SECRET_PATH", "test-admin")
 os.environ.setdefault("DEBUG", "0")
+os.environ.setdefault("SOCKETIO_ASYNC_MODE", "threading")
 
 from app import app, socketio  # noqa: E402
 from database import DATABASE_PATH, get_connection, get_game_state, list_players  # noqa: E402
@@ -88,7 +90,15 @@ def test_main_game_flow() -> None:
         == 100
     )
 
-    assert admin_client.post("/api/admin/questions/parents_500/open").status_code == 200
+    with patch(
+        "app.probe_active_player_tokens",
+        return_value={"token-1"},
+    ):
+        auction_open_response = admin_client.post(
+            "/api/admin/questions/parents_500/open"
+        )
+
+    assert auction_open_response.status_code == 200
     bid_response = player_client.post(
         "/api/player/auction-bid",
         json={
@@ -125,9 +135,24 @@ def test_main_game_flow() -> None:
         ).status_code
         == 200
     )
-    reveal_response = admin_client.post("/api/admin/final/reveal")
-    assert reveal_response.status_code == 200
-    assert reveal_response.get_json()["answer"] == "girl"
+    with (
+        patch("app.FINAL_SEQUENCE_START_DELAY_MS", 1),
+        patch("app.FINAL_DRUMROLL_DURATION_MS", 1),
+        patch("app.FINAL_REVEAL_BROADCAST_LEAD_MS", 0),
+    ):
+        reveal_response = admin_client.post("/api/admin/final/reveal")
+
+        assert reveal_response.status_code == 200
+
+        reveal_payload = reveal_response.get_json()
+        assert reveal_payload["schedule"]["sequence_id"]
+
+        # Give the Socket.IO background task time to complete the shortened reveal.
+        socketio.sleep(0.1)
+
+    final_state = get_game_state()
+    assert final_state["current_phase"] == "final_revealed"
+    assert final_state["actual_gender"] == "girl"
 
     assert admin_client.post("/api/admin/secret/start").status_code == 200
     assert (

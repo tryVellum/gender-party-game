@@ -17,6 +17,7 @@ from flask import (
     render_template,
     request,
     send_from_directory,
+    session,
     url_for,
 )
 from flask_socketio import SocketIO, emit, join_room
@@ -73,7 +74,7 @@ DATA_DIR = Path(app.root_path) / "data"
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="eventlet",
+    async_mode=Config.SOCKETIO_ASYNC_MODE,
     ping_interval=5,
     ping_timeout=10,
 )
@@ -312,9 +313,10 @@ def player_page() -> str:
     return render_template("player.html")
 
 
-@app.get("/admin-secret-2026")
+@app.get(f"/{Config.ADMIN_SECRET_PATH}")
 def admin_page() -> str:
-    """Render admin screen by secret URL."""
+    """Render admin screen by configured secret URL."""
+    session["is_admin"] = True
     return render_template("admin.html")
 
 
@@ -322,6 +324,24 @@ def admin_page() -> str:
 def blocked_admin_page() -> None:
     """Block obvious admin URL."""
     abort(404)
+
+
+@app.before_request
+def protect_admin_api() -> Any | None:
+    """Allow admin API calls only after opening the secret admin page."""
+    if request.path.startswith("/api/admin/") and not session.get("is_admin"):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "admin_access_required",
+                    "message": ("Сначала откройте секретную страницу администратора."),
+                }
+            ),
+            403,
+        )
+
+    return None
 
 
 @app.get("/api/player")
@@ -459,7 +479,7 @@ def api_admin_board() -> Any:
 @app.post("/api/admin/game/reset")
 def api_reset_game() -> Any:
     """Reset game progress."""
-    reset_game()
+    reset_game(actual_gender=Config.ACTUAL_GENDER)
 
     connected_player_tokens_by_sid.clear()
     connected_sids_by_player_token.clear()
@@ -998,7 +1018,7 @@ def api_start_final_round() -> Any:
             }
         ), 409
 
-    start_final_round()
+    start_final_round(actual_gender=Config.ACTUAL_GENDER)
 
     counts = get_final_vote_counts()
 

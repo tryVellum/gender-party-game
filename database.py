@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,19 +34,27 @@ class NoOpenQuestionError(ValueError):
     """Raised when there is no open question to close."""
 
 
-def get_connection() -> sqlite3.Connection:
-    """Create SQLite connection with row access by column name."""
+@contextmanager
+def get_connection() -> Iterator[sqlite3.Connection]:
+    """Provide a SQLite connection and always close it after use."""
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(DATABASE_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
 
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = NORMAL")
-    connection.execute("PRAGMA busy_timeout = 5000")
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 5000")
 
-    return connection
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def ensure_column(
@@ -1292,8 +1302,20 @@ def close_auction_question_and_calculate_score(
     return score_updates
 
 
-def start_final_round() -> None:
+def normalize_actual_gender(actual_gender: str) -> str:
+    """Validate and normalize the configured actual gender."""
+    normalized_gender = actual_gender.strip().lower()
+
+    if normalized_gender not in {"boy", "girl"}:
+        raise ValueError("Actual gender must be either 'boy' or 'girl'.")
+
+    return normalized_gender
+
+
+def start_final_round(*, actual_gender: str) -> None:
     """Start final gender voting round."""
+    normalized_gender = normalize_actual_gender(actual_gender)
+
     with get_connection() as connection:
         connection.execute(
             """
@@ -1310,13 +1332,14 @@ def start_final_round() -> None:
                 question_open = 0,
                 auction_winner_player_id = NULL,
                 final_locked = 0,
-                actual_gender = 'boy',
+                actual_gender = ?,
                 final_drumroll_start_at_ms = NULL,
                 final_reveal_at_ms = NULL,
                 final_reveal_sequence_id = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
-            """
+            """,
+            (normalized_gender,),
         )
 
 
@@ -1784,8 +1807,10 @@ def get_baby_name_winner() -> dict[str, Any] | None:
     return names[0]
 
 
-def reset_game() -> None:
+def reset_game(*, actual_gender: str) -> None:
     """Reset the whole game, including registered players."""
+    normalized_gender = normalize_actual_gender(actual_gender)
+
     with get_connection() as connection:
         connection.execute("DELETE FROM answers")
         connection.execute("DELETE FROM auction_participants")
@@ -1813,12 +1838,13 @@ def reset_game() -> None:
                 question_open = 0,
                 auction_winner_player_id = NULL,
                 final_locked = 0,
-                actual_gender = 'boy',
+                actual_gender = ?,
                 secret_round_open = 0,
                 final_drumroll_start_at_ms = NULL,
                 final_reveal_at_ms = NULL,
                 final_reveal_sequence_id = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
-            """
+            """,
+            (normalized_gender,),
         )
