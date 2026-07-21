@@ -19,10 +19,14 @@ class Config:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "5000"))
     DEBUG: bool = os.getenv("DEBUG", "0") == "1"
-    SOCKETIO_ASYNC_MODE: str = os.getenv(
-        "SOCKETIO_ASYNC_MODE",
-        "threading",
-    ).strip().lower()
+    SOCKETIO_ASYNC_MODE: str = (
+        os.getenv(
+            "SOCKETIO_ASYNC_MODE",
+            "threading",
+        )
+        .strip()
+        .lower()
+    )
 
 
 if not Config.ADMIN_SECRET_PATH:
