@@ -38,6 +38,7 @@ let auctionWinner = null;
 let activeFinalSequenceId = null;
 let finalDrumrollTimeoutId = null;
 let finalRevealTimeoutId = null;
+let activeAnswerRevealSequenceId = null;
 
 function getServerNowMs() {
   if (typeof window.getSynchronizedServerTimeMs === "function") {
@@ -144,6 +145,12 @@ function showWaitingState() {
     secretState.classList.add("hidden");
   }
 
+  waitingState.innerHTML = `
+    <p class="status-text">
+      Ждём начала игры...
+    </p>
+  `;
+
   playerQuestionMeta.textContent = "";
   playerQuestionTitle.textContent = "";
   renderPlayerQuestionImage(null);
@@ -152,16 +159,25 @@ function showWaitingState() {
 }
 
 
-function showWaitingStateWithResult(resultText) {
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function showWaitingStateWithResult(resultText, durationMs = 3500) {
   showWaitingState();
 
   if (lastResultTimeoutId) {
-    clearTimeout(lastResultTimeoutId);
+    window.clearTimeout(lastResultTimeoutId);
   }
 
   waitingState.innerHTML = `
     <div class="result-message">
-      ${resultText}
+      ${escapeHtml(resultText)}
     </div>
   `;
 
@@ -171,7 +187,59 @@ function showWaitingStateWithResult(resultText) {
         Ждём начала игры...
       </p>
     `;
-  }, 3500);
+  }, Math.max(0, durationMs));
+}
+
+function showAnswerRevealForPlayer(answerReveal, playerResult = null) {
+  if (!answerReveal || !answerReveal.sequence_id) {
+    showWaitingState();
+    return;
+  }
+
+  const sequenceId = String(answerReveal.sequence_id);
+  const revealUntilMs = Number(answerReveal.player_reveal_until_ms);
+  const remainingMs = Number.isFinite(revealUntilMs)
+    ? Math.max(0, revealUntilMs - getServerNowMs())
+    : 10000;
+
+  activeAnswerRevealSequenceId = sequenceId;
+  showWaitingState();
+
+  if (lastResultTimeoutId) {
+    window.clearTimeout(lastResultTimeoutId);
+  }
+
+  let resultText = "Ответ не был отправлен. Баллы не изменились.";
+
+  if (playerResult && playerResult.answer !== null) {
+    const pointsDelta = Number(playerResult.points_delta || 0);
+    const sign = pointsDelta > 0 ? "+" : "";
+    resultText = playerResult.is_correct
+      ? `Ваш ответ правильный: ${sign}${pointsDelta} баллов`
+      : `Ваш ответ неправильный: ${pointsDelta} баллов`;
+  }
+
+  waitingState.innerHTML = `
+    <div class="result-message answer-reveal-message">
+      <span class="answer-reveal-label">Правильный ответ</span>
+      <strong>${escapeHtml(answerReveal.correct_answer || "—")}</strong>
+      <small>${escapeHtml(resultText)}</small>
+    </div>
+  `;
+
+  if (currentPlayer && playerResult && Number.isFinite(Number(playerResult.score))) {
+    currentPlayer.score = Number(playerResult.score);
+    playerScore.textContent = String(playerResult.score);
+  }
+
+  lastResultTimeoutId = window.setTimeout(() => {
+    if (activeAnswerRevealSequenceId !== sequenceId) {
+      return;
+    }
+
+    activeAnswerRevealSequenceId = null;
+    showWaitingState();
+  }, remainingMs);
 }
 
 
@@ -914,6 +982,14 @@ if (babyNameForm) {
 function applyGameState(gameState) {
   const phase = gameState.state.current_phase;
 
+  if (phase === "answer_reveal") {
+    showAnswerRevealForPlayer(
+      gameState.answer_reveal,
+      gameState.answer_reveal_result,
+    );
+    return;
+  }
+
   if (phase === "secret_names") {
     showSecretState(gameState.baby_names || []);
     return;
@@ -1090,28 +1166,47 @@ socket.on("question_opened", (data) => {
 
 socket.on("question_closed", (data) => {
   if (!currentPlayer) {
-    showWaitingState();
+    showAnswerRevealForPlayer(data.answer_reveal, null);
     return;
   }
 
   const scoreUpdates = data.score_updates || [];
-  const myUpdate = scoreUpdates.find((item) => item.player_id === currentPlayer.id);
+  const myUpdate = scoreUpdates.find((item) => {
+    return Number(item.player_id) === Number(currentPlayer.id);
+  });
 
-  if (!myUpdate) {
-    showWaitingStateWithResult("Ответ не был отправлен. Баллы не изменились.");
+  const playerResult = myUpdate
+    ? {
+        answer: selectedAnswer,
+        is_correct: Boolean(myUpdate.is_correct),
+        points_delta: Number(myUpdate.points_delta || 0),
+        score: Number(myUpdate.score),
+      }
+    : {
+        answer: null,
+        is_correct: null,
+        points_delta: 0,
+        score: Number(currentPlayer.score),
+      };
+
+  showAnswerRevealForPlayer(data.answer_reveal, playerResult);
+});
+
+socket.on("answer_reveal_finished", (data) => {
+  const sequenceId = String(data && data.sequence_id || "");
+
+  if (
+    activeAnswerRevealSequenceId
+    && sequenceId
+    && activeAnswerRevealSequenceId !== sequenceId
+  ) {
     return;
   }
 
-  currentPlayer.score = myUpdate.score;
-  playerScore.textContent = String(myUpdate.score);
-
-  const sign = myUpdate.points_delta > 0 ? "+" : "";
-  const resultText = myUpdate.is_correct
-    ? `Правильно! ${sign}${myUpdate.points_delta} баллов`
-    : `Неправильно. ${myUpdate.points_delta} баллов`;
-
-  showWaitingStateWithResult(resultText);
+  activeAnswerRevealSequenceId = null;
+  showWaitingState();
 });
+
 
 socket.on("score_updated", (data) => {
   if (!currentPlayer) {
@@ -1235,6 +1330,7 @@ socket.on("game_reset", () => {
   currentAuction = null;
   auctionWinner = null;
   activeFinalSequenceId = null;
+  activeAnswerRevealSequenceId = null;
   clearFinalSequenceTimers();
 
   showWaitingState();

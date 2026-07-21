@@ -47,7 +47,6 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute("PRAGMA busy_timeout = 5000")
-
         yield connection
         connection.commit()
     except Exception:
@@ -288,6 +287,27 @@ def init_database() -> None:
             table_name="game_state",
             column_name="final_reveal_sequence_id",
             column_definition="TEXT",
+        )
+
+        ensure_column(
+            connection=connection,
+            table_name="game_state",
+            column_name="answer_reveal_sequence_id",
+            column_definition="TEXT",
+        )
+
+        ensure_column(
+            connection=connection,
+            table_name="game_state",
+            column_name="answer_reveal_started_at_ms",
+            column_definition="INTEGER",
+        )
+
+        ensure_column(
+            connection=connection,
+            table_name="game_state",
+            column_name="answer_reveal_ends_at_ms",
+            column_definition="INTEGER",
         )
 
         ensure_column(
@@ -652,7 +672,10 @@ def get_game_state() -> dict[str, Any]:
                 secret_round_open,
                 final_drumroll_start_at_ms,
                 final_reveal_at_ms,
-                final_reveal_sequence_id
+                final_reveal_sequence_id,
+                answer_reveal_sequence_id,
+                answer_reveal_started_at_ms,
+                answer_reveal_ends_at_ms
             FROM game_state
             WHERE id = 1
             """
@@ -680,6 +703,9 @@ def set_current_question(
                 current_question_id = ?,
                 question_open = 1,
                 auction_winner_player_id = ?,
+                answer_reveal_sequence_id = NULL,
+                answer_reveal_started_at_ms = NULL,
+                answer_reveal_ends_at_ms = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
             """,
@@ -698,10 +724,74 @@ def clear_current_question() -> None:
                 current_question_id = NULL,
                 question_open = 0,
                 auction_winner_player_id = NULL,
+                answer_reveal_sequence_id = NULL,
+                answer_reveal_started_at_ms = NULL,
+                answer_reveal_ends_at_ms = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
             """
         )
+
+
+def start_answer_reveal(
+    *,
+    question_id: str,
+    sequence_id: str,
+    started_at_ms: int,
+    ends_at_ms: int,
+) -> None:
+    """Persist the temporary correct-answer reveal phase."""
+    if not question_id.strip():
+        raise ValueError("Question id is required for answer reveal.")
+
+    if not sequence_id.strip():
+        raise ValueError("Sequence id is required for answer reveal.")
+
+    if started_at_ms <= 0 or ends_at_ms <= started_at_ms:
+        raise ValueError("Answer reveal timing is invalid.")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE game_state
+            SET
+                current_phase = 'answer_reveal',
+                current_question_id = ?,
+                question_open = 0,
+                auction_winner_player_id = NULL,
+                answer_reveal_sequence_id = ?,
+                answer_reveal_started_at_ms = ?,
+                answer_reveal_ends_at_ms = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            """,
+            (question_id, sequence_id, started_at_ms, ends_at_ms),
+        )
+
+
+def finish_answer_reveal(sequence_id: str) -> bool:
+    """Finish one answer reveal sequence and return whether it was active."""
+    with get_connection() as connection:
+        result = connection.execute(
+            """
+            UPDATE game_state
+            SET
+                current_phase = 'waiting',
+                current_question_id = NULL,
+                question_open = 0,
+                auction_winner_player_id = NULL,
+                answer_reveal_sequence_id = NULL,
+                answer_reveal_started_at_ms = NULL,
+                answer_reveal_ends_at_ms = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+              AND current_phase = 'answer_reveal'
+              AND answer_reveal_sequence_id = ?
+            """,
+            (sequence_id,),
+        )
+
+    return result.rowcount == 1
 
 
 def save_player_answer(
@@ -758,7 +848,14 @@ def get_answer_for_player(
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT id, player_id, question_id, answer, locked
+            SELECT
+                id,
+                player_id,
+                question_id,
+                answer,
+                is_correct,
+                points_delta,
+                locked
             FROM answers
             WHERE player_id = ? AND question_id = ?
             """,
@@ -787,7 +884,8 @@ def is_answer_correct(
     normalized_player_answer = normalize_answer(player_answer)
 
     normalized_correct_answers = {
-        normalize_answer(correct_answer) for correct_answer in correct_answers
+        normalize_answer(correct_answer)
+        for correct_answer in correct_answers
     }
 
     return normalized_player_answer in normalized_correct_answers
@@ -891,7 +989,9 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
         for answer in answers:
             correct = normalize_answer(answer["answer"]) in normalized_correct_answers
             points_delta = (
-                int(question["points"]) if correct else -int(question["points"])
+                int(question["points"])
+                if correct
+                else -int(question["points"])
             )
 
             connection.execute(
@@ -1009,7 +1109,10 @@ def create_auction_snapshot(question_id: str) -> list[dict[str, Any]]:
             )
             VALUES (?, ?)
             """,
-            [(question_id, int(player["id"])) for player in active_players],
+            [
+                (question_id, int(player["id"]))
+                for player in active_players
+            ],
         )
 
     return active_players
@@ -1336,6 +1439,9 @@ def start_final_round(*, actual_gender: str) -> None:
                 final_drumroll_start_at_ms = NULL,
                 final_reveal_at_ms = NULL,
                 final_reveal_sequence_id = NULL,
+                answer_reveal_sequence_id = NULL,
+                answer_reveal_started_at_ms = NULL,
+                answer_reveal_ends_at_ms = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
             """,
@@ -1644,9 +1750,7 @@ def submit_baby_name(
         ).fetchone()
 
         if existing_player_name is not None:
-            raise ValueError(
-                "Вы уже предложили имя. Один игрок может предложить только одно имя."
-            )
+            raise ValueError("Вы уже предложили имя. Один игрок может предложить только одно имя.")
 
         existing = connection.execute(
             """
@@ -1843,8 +1947,12 @@ def reset_game(*, actual_gender: str) -> None:
                 final_drumroll_start_at_ms = NULL,
                 final_reveal_at_ms = NULL,
                 final_reveal_sequence_id = NULL,
+                answer_reveal_sequence_id = NULL,
+                answer_reveal_started_at_ms = NULL,
+                answer_reveal_ends_at_ms = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
             """,
             (normalized_gender,),
         )
+

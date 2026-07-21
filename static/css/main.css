@@ -1317,3 +1317,52 @@ body:fullscreen .admin-board {
   }
 }
 
+
+
+/* Temporary correct-answer reveal and resilient admin closing state. */
+.question-cell.temporarily-disabled {
+  cursor: wait;
+  opacity: 0.5;
+  filter: saturate(0.65);
+}
+
+.admin-question-card.is-processing {
+  cursor: progress;
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+.correct-answer-preview {
+  min-height: 150px;
+  font-size: clamp(34px, 5vw, 72px);
+  line-height: 1.08;
+  background: linear-gradient(
+    135deg,
+    rgba(167, 216, 255, 0.92),
+    rgba(248, 169, 196, 0.92)
+  );
+}
+
+.answer-reveal-message {
+  display: grid;
+  gap: 10px;
+}
+
+.answer-reveal-message .answer-reveal-label {
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+.answer-reveal-message strong {
+  display: block;
+  font-size: clamp(30px, 8vw, 48px);
+  line-height: 1.08;
+}
+
+.answer-reveal-message small {
+  display: block;
+  font-size: 16px;
+  line-height: 1.35;
+}

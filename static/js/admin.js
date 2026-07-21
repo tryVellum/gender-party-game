@@ -51,6 +51,13 @@ let drumrollStartTimeoutId = null;
 let finalRevealTimeoutId = null;
 let lastBabySoundSequenceId = null;
 let audioUnlocked = false;
+let activeAnswerRevealSequenceId = null;
+let answerRevealAdminTimeoutId = null;
+let answerRevealFinishTimeoutId = null;
+let answerRevealInProgress = false;
+let lastBoard = [];
+let lastAllQuestionsUsed = false;
+let adminStateRefreshInProgress = false;
 
 
 function getServerNowMs() {
@@ -270,10 +277,115 @@ function renderRating(players) {
     .join("");
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function clearAnswerRevealTimers() {
+  if (answerRevealAdminTimeoutId !== null) {
+    window.clearTimeout(answerRevealAdminTimeoutId);
+    answerRevealAdminTimeoutId = null;
+  }
+
+  if (answerRevealFinishTimeoutId !== null) {
+    window.clearTimeout(answerRevealFinishTimeoutId);
+    answerRevealFinishTimeoutId = null;
+  }
+}
+
+function finishAdminAnswerReveal(sequenceId = null) {
+  if (
+    sequenceId
+    && activeAnswerRevealSequenceId
+    && sequenceId !== activeAnswerRevealSequenceId
+  ) {
+    return;
+  }
+
+  clearAnswerRevealTimers();
+  answerRevealInProgress = false;
+  activeAnswerRevealSequenceId = null;
+
+  if (questionModal && !questionModal.classList.contains("hidden")) {
+    hideAdminQuestionCard();
+  }
+
+  renderBoard(lastBoard, lastAllQuestionsUsed);
+}
+
+function showAdminAnswerReveal(answerReveal) {
+  if (!answerReveal || !answerReveal.sequence_id) {
+    return;
+  }
+
+  const sequenceId = String(answerReveal.sequence_id);
+  const adminRevealUntilMs = Number(answerReveal.admin_reveal_until_ms);
+  const playerRevealUntilMs = Number(answerReveal.player_reveal_until_ms);
+  const nowMs = getServerNowMs();
+
+  clearAnswerRevealTimers();
+  activeAnswerRevealSequenceId = sequenceId;
+  answerRevealInProgress = Number.isFinite(playerRevealUntilMs)
+    ? playerRevealUntilMs > nowMs
+    : true;
+  currentQuestion = null;
+  stopAuctionSound();
+
+  if (!Number.isFinite(adminRevealUntilMs) || adminRevealUntilMs > nowMs) {
+    questionModal.classList.remove("hidden");
+    adminQuestionCard.classList.remove("auction-question-card");
+    renderAdminQuestionImage(null);
+    adminQuestionCategory.textContent = "Ответы зафиксированы";
+    adminQuestionTitle.textContent = "Правильный ответ";
+    updateAdminQuestionTitleScale("Правильный ответ");
+    adminQuestionOptions.innerHTML = `
+      <div class="admin-option-preview text-question-preview correct-answer-preview">
+        ${escapeHtml(answerReveal.correct_answer || "—")}
+      </div>
+    `;
+    const remainingPlayerSeconds = Number.isFinite(playerRevealUntilMs)
+      ? Math.max(0, Math.ceil((playerRevealUntilMs - nowMs) / 1000))
+      : 10;
+    const hint = document.querySelector("#admin-question-card .question-close-hint");
+    if (hint) {
+      hint.textContent = `Игроки видят ответ ещё ${remainingPlayerSeconds} сек.`;
+    }
+
+    const adminRemainingMs = Number.isFinite(adminRevealUntilMs)
+      ? Math.max(0, adminRevealUntilMs - nowMs)
+      : 5000;
+
+    answerRevealAdminTimeoutId = window.setTimeout(() => {
+      answerRevealAdminTimeoutId = null;
+      hideAdminQuestionCard();
+    }, adminRemainingMs);
+  } else {
+    hideAdminQuestionCard();
+  }
+
+  renderBoard(lastBoard, lastAllQuestionsUsed);
+
+  const finishRemainingMs = Number.isFinite(playerRevealUntilMs)
+    ? Math.max(0, playerRevealUntilMs - nowMs)
+    : 10000;
+
+  answerRevealFinishTimeoutId = window.setTimeout(() => {
+    answerRevealFinishTimeoutId = null;
+    finishAdminAnswerReveal(sequenceId);
+  }, finishRemainingMs);
+}
+
 function renderBoard(board, allQuestionsUsed) {
+  lastBoard = Array.isArray(board) ? board : [];
+  lastAllQuestionsUsed = Boolean(allQuestionsUsed);
   adminBoard.innerHTML = "";
 
-  board.forEach((row) => {
+  lastBoard.forEach((row) => {
     const categoryCell = document.createElement("div");
     categoryCell.className = "board-cell category-cell";
     categoryCell.textContent = row.category;
@@ -298,6 +410,10 @@ function renderBoard(board, allQuestionsUsed) {
       if (question.is_used) {
         questionCell.disabled = true;
         questionCell.classList.add("used");
+      } else if (answerRevealInProgress) {
+        questionCell.disabled = true;
+        questionCell.classList.add("temporarily-disabled");
+        questionCell.title = "Дождитесь окончания показа правильного ответа";
       }
 
       questionCell.addEventListener("click", () => {
@@ -308,7 +424,7 @@ function renderBoard(board, allQuestionsUsed) {
     });
   });
 
-  finalRoundButton.disabled = !allQuestionsUsed;
+  finalRoundButton.disabled = !lastAllQuestionsUsed || answerRevealInProgress;
 }
 
 function renderAdminQuestionImage(question, visible = true) {
@@ -409,6 +525,10 @@ function hideAdminQuestionCard() {
   adminQuestionTitle.textContent = "";
   updateAdminQuestionTitleScale();
   adminQuestionOptions.innerHTML = "";
+  const hint = document.querySelector("#admin-question-card .question-close-hint");
+  if (hint) {
+    hint.textContent = "Нажмите на карточку, чтобы закрыть вопрос";
+  }
 }
 
 function showFinalModal(counts = { boy: 0, girl: 0 }) {
@@ -675,6 +795,15 @@ async function loadCurrentGameState() {
   const data = await response.json();
   const phase = data.state && data.state.current_phase;
 
+  if (phase === "answer_reveal") {
+    showAdminAnswerReveal(data.answer_reveal);
+    return;
+  }
+
+  if (answerRevealInProgress) {
+    finishAdminAnswerReveal();
+  }
+
   if (phase === "final_open") {
     if (finalModal.classList.contains("hidden") || isFinalRevealed || isFinalRevealing) {
       showFinalModal(data.final_counts || { boy: 0, girl: 0 });
@@ -764,8 +893,15 @@ async function openQuestion(questionId) {
   const data = await response.json();
 
   if (!response.ok) {
-    if (data.error === "question_already_open") {
-      await loadCurrentGameState();
+    if (
+      data.error === "question_already_open"
+      || data.error === "answer_reveal_in_progress"
+    ) {
+      if (data.answer_reveal) {
+        showAdminAnswerReveal(data.answer_reveal);
+      } else {
+        await loadCurrentGameState();
+      }
       return;
     }
 
@@ -781,7 +917,7 @@ async function openQuestion(questionId) {
 }
 
 async function closeCurrentQuestion() {
-  if (isClosingQuestion) {
+  if (answerRevealInProgress || isClosingQuestion) {
     return;
   }
 
@@ -789,17 +925,33 @@ async function closeCurrentQuestion() {
     await loadCurrentGameState();
 
     if (!currentQuestion) {
-      alert("Сейчас нет открытой карточки вопроса. Обновляю состояние игры.");
+      alert("Сейчас нет открытой карточки вопроса. Состояние игры обновлено.");
       return;
     }
   }
 
   isClosingQuestion = true;
+  adminQuestionCard.classList.add("is-processing");
 
   try {
-    const response = await fetchWithTimeout("/api/admin/questions/current/close", {
-      method: "POST",
-    });
+    let response;
+
+    try {
+      response = await fetchWithTimeout("/api/admin/questions/current/close", {
+        method: "POST",
+        timeoutMs: 15000,
+      });
+    } catch (firstError) {
+      if (!socket.connected) {
+        socket.connect();
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      response = await fetchWithTimeout("/api/admin/questions/current/close", {
+        method: "POST",
+        timeoutMs: 15000,
+      });
+    }
 
     const data = await response.json();
 
@@ -810,19 +962,37 @@ async function closeCurrentQuestion() {
         return;
       }
 
+      if (data.error === "answer_reveal_in_progress" && data.answer_reveal) {
+        showAdminAnswerReveal(data.answer_reveal);
+        return;
+      }
+
       alert(data.message || "Не удалось закрыть вопрос.");
       return;
     }
 
-    hideAdminQuestionCard();
-    renderBoard(data.board, data.all_questions_used);
+    renderBoard(data.board || [], Boolean(data.all_questions_used));
     renderRating(data.players || []);
+
+    if (data.answer_reveal) {
+      showAdminAnswerReveal(data.answer_reveal);
+    } else {
+      hideAdminQuestionCard();
+    }
   } catch (error) {
-    alert("Не удалось закрыть вопрос. Проверьте, запущен ли сервер, и обновите страницу администратора.");
+    await loadCurrentGameState();
+
+    if (!answerRevealInProgress) {
+      alert(
+        "Не удалось закрыть вопрос. Состояние игры обновлено; попробуйте нажать карточку ещё раз."
+      );
+    }
   } finally {
     isClosingQuestion = false;
+    adminQuestionCard.classList.remove("is-processing");
   }
 }
+
 
 async function fetchWithTimeout(url, options = {}) {
   const timeoutMs = options.timeoutMs || 8000;
@@ -875,7 +1045,13 @@ if (finalRoundButton) {
 }
 
 if (adminQuestionCard) {
-  adminQuestionCard.addEventListener("click", closeCurrentQuestion);
+  adminQuestionCard.addEventListener("click", () => {
+    if (answerRevealInProgress) {
+      return;
+    }
+
+    closeCurrentQuestion();
+  });
 }
 
 if (resetGameButton) {
@@ -927,6 +1103,9 @@ socket.on("game_reset", () => {
   stopAudio(drumrollAudio);
   stopAudio(babyLaughterAudio);
   activeFinalSequenceId = null;
+  clearAnswerRevealTimers();
+  activeAnswerRevealSequenceId = null;
+  answerRevealInProgress = false;
   isFinalRevealing = false;
   isFinalRevealed = false;
 });
@@ -940,8 +1119,17 @@ socket.on("question_opened", (data) => {
 
 socket.on("question_closed", (data) => {
   stopAuctionSound();
-  hideAdminQuestionCard();
   renderBoard(data.board || [], Boolean(data.all_questions_used));
+
+  if (data.answer_reveal) {
+    showAdminAnswerReveal(data.answer_reveal);
+  } else {
+    hideAdminQuestionCard();
+  }
+});
+
+socket.on("answer_reveal_finished", (data) => {
+  finishAdminAnswerReveal(String(data && data.sequence_id || ""));
 });
 
 socket.on("connect", () => {
@@ -1011,6 +1199,12 @@ socket.on("baby_names_updated", (data) => {
 });
 
 async function refreshAdminStateAfterIdle() {
+  if (adminStateRefreshInProgress || isClosingQuestion) {
+    return;
+  }
+
+  adminStateRefreshInProgress = true;
+
   try {
     if (!socket.connected) {
       socket.connect();
@@ -1020,8 +1214,11 @@ async function refreshAdminStateAfterIdle() {
     socket.emit("admin_request_rating");
   } catch (error) {
     console.warn("Не удалось обновить состояние админки после простоя.", error);
+  } finally {
+    adminStateRefreshInProgress = false;
   }
 }
+
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
@@ -1032,6 +1229,12 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", () => {
   refreshAdminStateAfterIdle();
 });
+
+window.setInterval(() => {
+  if (!document.hidden) {
+    refreshAdminStateAfterIdle();
+  }
+}, 30000);
 
 loadBoard();
 if (adminQuestionImage) {
