@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import socket
 import time
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import qrcode
+from PIL import Image, UnidentifiedImageError
 
 from flask import (
     Flask,
@@ -25,8 +27,10 @@ from flask_socketio import SocketIO, emit, join_room
 from config import Config
 from database import (
     NicknameAlreadyExistsError,
+    GameEditorValidationError,
     QuestionAlreadyUsedError,
     QuestionNotFoundError,
+    are_any_questions_used,
     are_all_auction_bids_submitted,
     are_all_questions_used,
     build_admin_board,
@@ -44,8 +48,11 @@ from database import (
     init_database,
     list_auction_participants,
     list_players,
+    load_game_settings,
+    load_questions_from_json,
     save_auction_bid,
     save_player_answer,
+    save_editor_configuration,
     seed_questions,
     set_auction_winner,
     set_current_question,
@@ -70,6 +77,7 @@ from database import (
 
 app = Flask(__name__)
 app.config.from_object(Config)
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
 DATA_DIR = Path(app.root_path) / "data"
 
@@ -96,6 +104,7 @@ FINAL_SEQUENCE_START_DELAY_MS = 900
 FINAL_REVEAL_BROADCAST_LEAD_MS = 700
 ANSWER_REVEAL_PLAYER_DURATION_MS = 10_000
 ANSWER_REVEAL_ADMIN_DURATION_MS = 5_000
+MAX_EDITOR_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_FILES = {
     "zvuk-barabannoj-drobi.mp3",
     "the-sound-of-happy-baby-laughter.mp3",
@@ -128,6 +137,58 @@ def refresh_connected_players_from_socket_registry() -> None:
 def current_time_ms() -> int:
     """Return current Unix time in milliseconds."""
     return time.time_ns() // 1_000_000
+
+
+def get_configured_actual_gender() -> str:
+    """Return the editor setting, falling back to the environment value."""
+    return load_game_settings(
+        default_actual_gender=Config.ACTUAL_GENDER,
+    )["actual_gender"]
+
+
+def save_editor_image(question_id: str, uploaded_file: Any) -> str:
+    """Validate an uploaded JPEG and save it under a generated safe name."""
+    original_filename = str(uploaded_file.filename or "").strip()
+    suffix = Path(original_filename).suffix.lower()
+    if suffix not in {".jpg", ".jpeg"}:
+        raise GameEditorValidationError("Для вопросов можно загружать только JPG/JPEG.")
+
+    uploaded_file.stream.seek(0, 2)
+    file_size = uploaded_file.stream.tell()
+    uploaded_file.stream.seek(0)
+    if file_size <= 0:
+        raise GameEditorValidationError("Загружено пустое изображение.")
+    if file_size > MAX_EDITOR_IMAGE_BYTES:
+        raise GameEditorValidationError("Размер изображения не должен превышать 5 МБ.")
+
+    try:
+        with Image.open(uploaded_file.stream) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > 20_000_000:
+                raise GameEditorValidationError(
+                    "Изображение имеет недопустимые размеры. Максимум — 20 мегапикселей."
+                )
+            image.verify()
+            if image.format != "JPEG":
+                raise GameEditorValidationError(
+                    "Файл имеет расширение JPG, но не является JPEG-изображением."
+                )
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as error:
+        raise GameEditorValidationError(
+            "Не удалось прочитать JPEG-изображение."
+        ) from error
+    finally:
+        uploaded_file.stream.seek(0)
+
+    safe_question_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in question_id
+    ).strip("-")
+    filename = f"{safe_question_id}-{uuid.uuid4().hex[:10]}.jpg"
+    destination = DATA_DIR / filename
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    uploaded_file.save(destination)
+    return filename
 
 
 def build_final_schedule_payload(
@@ -375,6 +436,34 @@ def build_current_question_payload() -> dict[str, Any] | None:
     }
 
 
+def build_editor_question_payload(question: dict[str, Any]) -> dict[str, Any]:
+    """Add a browser-ready image URL to one editor question."""
+    image_filename = question.get("image")
+    return {
+        **question,
+        "image_url": (
+            url_for("question_image", filename=image_filename)
+            if image_filename
+            else None
+        ),
+    }
+
+
+def build_editor_payload() -> dict[str, Any]:
+    """Build the complete game editor response."""
+    questions = load_questions_from_json()
+    return {
+        "questions": [
+            build_editor_question_payload(question) for question in questions
+        ],
+        "actual_gender": get_configured_actual_gender(),
+        "limits": {
+            "max_image_bytes": MAX_EDITOR_IMAGE_BYTES,
+            "max_options": 8,
+        },
+    }
+
+
 def build_auction_public_payload(question_id: str) -> dict[str, Any]:
     """Build public auction payload including the immutable participant snapshot."""
     progress = get_auction_progress(question_id)
@@ -385,8 +474,7 @@ def build_auction_public_payload(question_id: str) -> dict[str, Any]:
         "participants_count": progress["participants_count"],
         "bids_count": progress["bids_count"],
         "participant_player_ids": [
-            int(participant["id"])
-            for participant in participants
+            int(participant["id"]) for participant in participants
         ],
     }
 
@@ -425,6 +513,13 @@ def admin_page() -> str:
     """Render admin screen by configured secret URL."""
     session["is_admin"] = True
     return render_template("admin.html")
+
+
+@app.get(f"/{Config.ADMIN_SECRET_PATH}/editor")
+def editor_page() -> str:
+    """Render the protected game editor page."""
+    session["is_admin"] = True
+    return render_template("editor.html")
 
 
 @app.get("/admin")
@@ -583,10 +678,160 @@ def api_admin_board() -> Any:
     )
 
 
+@app.get("/api/admin/editor")
+def api_get_game_editor() -> Any:
+    """Return all editable game questions and settings."""
+    try:
+        editor_payload = build_editor_payload()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "editor_load_failed",
+                "message": f"Не удалось загрузить редактор: {error}",
+            }
+        ), 500
+
+    return jsonify({"ok": True, **editor_payload})
+
+
+@app.post("/api/admin/editor")
+def api_save_game_editor() -> Any:
+    """Validate and persist the complete game editor configuration."""
+    state = get_game_state()
+    if (
+        state.get("current_phase") != "waiting"
+        or bool(state.get("question_open"))
+        or are_any_questions_used()
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "game_already_started",
+                "message": (
+                    "Редактирование доступно только до начала игры. "
+                    "Сначала выполните полный сброс игры."
+                ),
+            }
+        ), 409
+
+    payload_text = request.form.get("payload", "")
+    if not payload_text and request.is_json:
+        payload_data = request.get_json(silent=True) or {}
+    else:
+        try:
+            payload_data = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_editor_payload",
+                    "message": "Браузер передал данные редактора в неверном формате.",
+                }
+            ), 400
+
+    if not isinstance(payload_data, dict):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "invalid_editor_payload",
+                "message": "Данные редактора имеют неверный формат.",
+            }
+        ), 400
+
+    submitted_questions = payload_data.get("questions")
+    if not isinstance(submitted_questions, list):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "invalid_editor_payload",
+                "message": "Не передан список вопросов.",
+            }
+        ), 400
+
+    current_questions = {
+        question["id"]: question for question in load_questions_from_json()
+    }
+    prepared_questions: list[dict[str, Any]] = []
+    created_image_paths: list[Path] = []
+
+    try:
+        for raw_question in submitted_questions:
+            if not isinstance(raw_question, dict):
+                prepared_questions.append(raw_question)
+                continue
+
+            prepared_question = dict(raw_question)
+            question_id = str(prepared_question.get("id", "")).strip()
+            uploaded_file = request.files.get(f"image_{question_id}")
+
+            if uploaded_file is not None and uploaded_file.filename:
+                image_filename = save_editor_image(question_id, uploaded_file)
+                prepared_question["image"] = image_filename
+                created_image_paths.append(DATA_DIR / image_filename)
+            elif bool(prepared_question.pop("remove_image", False)):
+                prepared_question.pop("image", None)
+            else:
+                current_image = current_questions.get(question_id, {}).get("image")
+                if current_image:
+                    prepared_question["image"] = current_image
+                else:
+                    prepared_question.pop("image", None)
+
+            prepared_questions.append(prepared_question)
+
+        normalized_questions, normalized_gender = save_editor_configuration(
+            questions=prepared_questions,
+            actual_gender=str(payload_data.get("actual_gender", "")),
+        )
+    except (GameEditorValidationError, ValueError) as error:
+        for image_path in created_image_paths:
+            image_path.unlink(missing_ok=True)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "editor_validation_failed",
+                "message": str(error),
+            }
+        ), 400
+    except OSError as error:
+        for image_path in created_image_paths:
+            image_path.unlink(missing_ok=True)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "editor_save_failed",
+                "message": f"Не удалось сохранить файлы редактора: {error}",
+            }
+        ), 500
+
+    board = build_admin_board()
+    socketio.emit(
+        "board_updated",
+        {
+            "board": board,
+            "all_questions_used": False,
+        },
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Настройки игры сохранены.",
+            "questions": [
+                build_editor_question_payload(question)
+                for question in normalized_questions
+            ],
+            "actual_gender": normalized_gender,
+            "board": board,
+        }
+    )
+
+
 @app.post("/api/admin/game/reset")
 def api_reset_game() -> Any:
     """Reset game progress."""
-    reset_game(actual_gender=Config.ACTUAL_GENDER)
+    reset_game(actual_gender=get_configured_actual_gender())
 
     connected_player_tokens_by_sid.clear()
     connected_sids_by_player_token.clear()
@@ -1178,7 +1423,7 @@ def api_start_final_round() -> Any:
             }
         ), 409
 
-    start_final_round(actual_gender=Config.ACTUAL_GENDER)
+    start_final_round(actual_gender=get_configured_actual_gender())
 
     counts = get_final_vote_counts()
 

@@ -16,10 +16,11 @@ env/
 .env.*
 !.env.example
 
-# Runtime database
+# Runtime database and private game settings
 instance/*.sqlite
 instance/*.sqlite-shm
 instance/*.sqlite-wal
+instance/game_settings.json
 !instance/.gitkeep
 
 # IDE and OS

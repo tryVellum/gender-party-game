@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import io
+import json
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
+
+from PIL import Image
 
 
 os.environ.setdefault("ACTUAL_GENDER", "girl")
@@ -16,6 +21,7 @@ from database import (  # noqa: E402
     finish_answer_reveal,
     get_connection,
     get_game_state,
+    get_question_by_id,
     list_players,
 )
 
@@ -69,10 +75,72 @@ def test_main_game_flow() -> None:
 
     assert player_client.get("/").status_code == 200
     assert player_client.get("/api/admin/board").status_code == 403
+    assert player_client.get("/api/admin/editor").status_code == 403
     assert admin_client.get("/test-admin").status_code == 200
+    assert admin_client.get("/test-admin/editor").status_code == 200
     assert admin_client.get("/api/admin/board").status_code == 200
     assert admin_client.get("/api/admin/player-link").status_code == 200
     assert player_client.get("/question-images/demo-balloons.jpg").status_code == 200
+
+    source_questions = json.loads(
+        Path("data/questions.json").read_text(encoding="utf-8")
+    )
+    editor_questions = []
+    for source_question in source_questions:
+        editor_question = dict(source_question)
+        editor_question.pop("image", None)
+        editor_questions.append(editor_question)
+
+    editor_data_dir = Path("instance/test-editor-data")
+    editor_data_dir.mkdir(parents=True, exist_ok=True)
+    editor_questions_path = editor_data_dir / "questions.json"
+    editor_settings_path = editor_data_dir / "game_settings.json"
+    editor_questions_path.write_text(
+        json.dumps(editor_questions, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (24, 24), "white").save(image_buffer, format="JPEG")
+    image_buffer.seek(0)
+
+    with (
+        patch("app.DATA_DIR", editor_data_dir),
+        patch("database.QUESTIONS_PATH", editor_questions_path),
+        patch("database.GAME_SETTINGS_PATH", editor_settings_path),
+    ):
+        editor_response = admin_client.get("/api/admin/editor")
+        assert editor_response.status_code == 200
+        editor_payload = editor_response.get_json()
+        assert len(editor_payload["questions"]) == 20
+
+        save_editor_response = admin_client.post(
+            "/api/admin/editor",
+            data={
+                "payload": json.dumps(
+                    {
+                        "actual_gender": "girl",
+                        "questions": editor_payload["questions"],
+                    },
+                    ensure_ascii=False,
+                ),
+                "image_pregnancy_100": (image_buffer, "question-photo.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+        assert save_editor_response.status_code == 200
+        saved_editor_payload = save_editor_response.get_json()
+        assert saved_editor_payload["actual_gender"] == "girl"
+        saved_first_question = next(
+            question
+            for question in saved_editor_payload["questions"]
+            if question["id"] == "pregnancy_100"
+        )
+        assert saved_first_question["image"].endswith(".jpg")
+        assert (editor_data_dir / saved_first_question["image"]).is_file()
+        assert editor_settings_path.is_file()
+
+    shutil.rmtree(editor_data_dir, ignore_errors=True)
 
     assert (
         player_client.post(
@@ -102,8 +170,7 @@ def test_main_game_flow() -> None:
     )
 
     assert (
-        admin_client.post("/api/admin/questions/pregnancy_100/open").status_code
-        == 200
+        admin_client.post("/api/admin/questions/pregnancy_100/open").status_code == 200
     )
     assert (
         player_client.post(
@@ -138,8 +205,7 @@ def test_main_game_flow() -> None:
 
     # A stale timestamp must not prevent closing a question after several minutes.
     assert (
-        admin_client.post("/api/admin/questions/pregnancy_200/open").status_code
-        == 200
+        admin_client.post("/api/admin/questions/pregnancy_200/open").status_code == 200
     )
     with get_connection() as connection:
         connection.execute(
@@ -153,7 +219,7 @@ def test_main_game_flow() -> None:
             json={
                 "device_token": "token-1",
                 "question_id": "pregnancy_200",
-                "answer": "Предполагаемая дата родов",
+                "answer": get_question_by_id("pregnancy_200")["correct_answers"][0],
             },
         ).status_code
         == 200

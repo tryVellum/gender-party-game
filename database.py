@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +14,15 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "instance" / "game.sqlite"
 QUESTIONS_PATH = BASE_DIR / "data" / "questions.json"
+GAME_SETTINGS_PATH = BASE_DIR / "instance" / "game_settings.json"
+
+QUESTION_CATEGORIES = ("Беременность", "Родители", "Роды", "Что это?")
+QUESTION_POINTS = (100, 200, 300, 400, 500)
+QUESTION_TYPES = {"choice", "text"}
+QUESTION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{3,80}")
+MAX_QUESTION_LENGTH = 1200
+MAX_OPTIONS_PER_QUESTION = 8
+MAX_CORRECT_ANSWERS = 30
 
 
 class NicknameAlreadyExistsError(ValueError):
@@ -32,6 +43,10 @@ class QuestionAlreadyUsedError(ValueError):
 
 class NoOpenQuestionError(ValueError):
     """Raised when there is no open question to close."""
+
+
+class GameEditorValidationError(ValueError):
+    """Raised when game editor data is invalid."""
 
 
 @contextmanager
@@ -463,18 +478,270 @@ def list_players() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _clean_string_list(value: Any, *, field_name: str) -> list[str]:
+    """Normalize a list of non-empty strings and preserve order."""
+    if not isinstance(value, list):
+        raise GameEditorValidationError(f"Поле «{field_name}» должно быть списком.")
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for raw_item in value:
+        item = str(raw_item).strip()
+        if not item:
+            continue
+
+        normalized = item.casefold()
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        result.append(item)
+
+    return result
+
+
+def validate_question_definitions(
+    questions: Any,
+    *,
+    require_existing_images: bool = True,
+) -> list[dict[str, Any]]:
+    """Validate and normalize all editable question definitions."""
+    if not isinstance(questions, list):
+        raise GameEditorValidationError("Список вопросов имеет неверный формат.")
+
+    expected_count = len(QUESTION_CATEGORIES) * len(QUESTION_POINTS)
+    if len(questions) != expected_count:
+        raise GameEditorValidationError(
+            f"Должно быть ровно {expected_count} вопросов: по 5 в каждой теме."
+        )
+
+    normalized_questions: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_cells: set[tuple[str, int]] = set()
+    auction_count = 0
+
+    for index, raw_question in enumerate(questions, start=1):
+        if not isinstance(raw_question, dict):
+            raise GameEditorValidationError(f"Вопрос №{index} имеет неверный формат.")
+
+        question_id = str(raw_question.get("id", "")).strip()
+        category = str(raw_question.get("category", "")).strip()
+        question_type = str(raw_question.get("type", "")).strip().lower()
+        question_text = str(raw_question.get("question", "")).strip()
+
+        try:
+            points = int(raw_question.get("points"))
+        except (TypeError, ValueError) as error:
+            raise GameEditorValidationError(
+                f"У вопроса №{index} неверно указана стоимость."
+            ) from error
+
+        if not QUESTION_ID_PATTERN.fullmatch(question_id):
+            raise GameEditorValidationError(
+                f"У вопроса №{index} недопустимый идентификатор «{question_id}»."
+            )
+        if question_id in seen_ids:
+            raise GameEditorValidationError(
+                f"Идентификатор «{question_id}» используется несколько раз."
+            )
+        seen_ids.add(question_id)
+
+        if category not in QUESTION_CATEGORIES:
+            raise GameEditorValidationError(
+                f"У вопроса «{question_id}» неизвестная тема «{category}»."
+            )
+        if points not in QUESTION_POINTS:
+            raise GameEditorValidationError(
+                f"У вопроса «{question_id}» недопустимая стоимость {points}."
+            )
+
+        cell = (category, points)
+        if cell in seen_cells:
+            raise GameEditorValidationError(
+                f"В теме «{category}» уже есть вопрос за {points} баллов."
+            )
+        seen_cells.add(cell)
+
+        if question_type not in QUESTION_TYPES:
+            raise GameEditorValidationError(
+                f"У вопроса «{question_id}» неизвестный тип ответа."
+            )
+        if not question_text:
+            raise GameEditorValidationError(
+                f"Введите текст вопроса для «{category} · {points}»."
+            )
+        if len(question_text) > MAX_QUESTION_LENGTH:
+            raise GameEditorValidationError(
+                f"Вопрос «{category} · {points}» длиннее {MAX_QUESTION_LENGTH} символов."
+            )
+
+        options = _clean_string_list(
+            raw_question.get("options", []),
+            field_name="варианты ответа",
+        )
+        correct_answers = _clean_string_list(
+            raw_question.get("correct_answers", []),
+            field_name="правильные ответы",
+        )
+
+        if question_type == "choice":
+            if not 2 <= len(options) <= MAX_OPTIONS_PER_QUESTION:
+                raise GameEditorValidationError(
+                    f"Для вопроса «{category} · {points}» задайте от 2 до "
+                    f"{MAX_OPTIONS_PER_QUESTION} вариантов ответа."
+                )
+            if not correct_answers:
+                raise GameEditorValidationError(
+                    f"Отметьте правильный вариант у вопроса «{category} · {points}»."
+                )
+
+            normalized_options = {option.casefold() for option in options}
+            missing_answers = [
+                answer
+                for answer in correct_answers
+                if answer.casefold() not in normalized_options
+            ]
+            if missing_answers:
+                raise GameEditorValidationError(
+                    f"Правильный ответ «{missing_answers[0]}» отсутствует среди "
+                    f"вариантов вопроса «{category} · {points}»."
+                )
+        else:
+            options = []
+            if not correct_answers:
+                raise GameEditorValidationError(
+                    f"Укажите хотя бы один правильный ответ для «{category} · {points}»."
+                )
+
+        if len(correct_answers) > MAX_CORRECT_ANSWERS:
+            raise GameEditorValidationError(
+                f"У вопроса «{category} · {points}» слишком много правильных ответов."
+            )
+
+        image_value = raw_question.get("image")
+        image_filename = str(image_value).strip() if image_value else None
+        if image_filename:
+            image_path = Path(image_filename)
+            if image_path.name != image_filename or image_path.suffix.lower() not in {
+                ".jpg",
+                ".jpeg",
+            }:
+                raise GameEditorValidationError(
+                    f"Для вопроса «{category} · {points}» допустим только файл JPG/JPEG."
+                )
+            if (
+                require_existing_images
+                and not (QUESTIONS_PATH.parent / image_filename).is_file()
+            ):
+                raise GameEditorValidationError(
+                    f"Файл изображения «{image_filename}» не найден в папке data."
+                )
+
+        is_auction = bool(raw_question.get("is_auction", False))
+        if is_auction:
+            auction_count += 1
+
+        normalized_questions.append(
+            {
+                "id": question_id,
+                "category": category,
+                "points": points,
+                "type": question_type,
+                "question": question_text,
+                **({"image": image_filename} if image_filename else {}),
+                "options": options,
+                "correct_answers": correct_answers,
+                "is_auction": is_auction,
+            }
+        )
+
+    expected_cells = {
+        (category, points)
+        for category in QUESTION_CATEGORIES
+        for points in QUESTION_POINTS
+    }
+    missing_cells = expected_cells - seen_cells
+    if missing_cells:
+        category, points = sorted(missing_cells)[0]
+        raise GameEditorValidationError(f"Отсутствует вопрос «{category} · {points}».")
+    if auction_count > 1:
+        raise GameEditorValidationError("Аукционным может быть только один вопрос.")
+
+    category_order = {
+        category: index for index, category in enumerate(QUESTION_CATEGORIES)
+    }
+    normalized_questions.sort(
+        key=lambda item: (category_order[item["category"]], item["points"])
+    )
+    return normalized_questions
+
+
 def load_questions_from_json() -> list[dict[str, Any]]:
-    """Load questions from JSON file."""
+    """Load and validate questions from the canonical JSON file."""
     if not QUESTIONS_PATH.exists():
         raise FileNotFoundError(f"Questions file was not found: {QUESTIONS_PATH}")
 
     with QUESTIONS_PATH.open("r", encoding="utf-8") as file:
         data = json.load(file)
 
-    if not isinstance(data, list):
-        raise ValueError("Questions JSON must contain a list.")
+    return validate_question_definitions(data)
 
-    return data
+
+def _sync_questions(
+    connection: sqlite3.Connection,
+    questions: list[dict[str, Any]],
+    *,
+    remove_missing: bool = False,
+) -> None:
+    """Synchronize normalized question definitions into SQLite."""
+    for question in questions:
+        connection.execute(
+            """
+            INSERT INTO questions (
+                id,
+                category,
+                points,
+                type,
+                question,
+                options_json,
+                correct_answers_json,
+                image_filename,
+                is_auction,
+                is_used
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(id)
+            DO UPDATE SET
+                category = excluded.category,
+                points = excluded.points,
+                type = excluded.type,
+                question = excluded.question,
+                options_json = excluded.options_json,
+                correct_answers_json = excluded.correct_answers_json,
+                image_filename = excluded.image_filename,
+                is_auction = excluded.is_auction,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                question["id"],
+                question["category"],
+                int(question["points"]),
+                question["type"],
+                question["question"],
+                json.dumps(question.get("options", []), ensure_ascii=False),
+                json.dumps(question.get("correct_answers", []), ensure_ascii=False),
+                question.get("image"),
+                1 if question.get("is_auction", False) else 0,
+            ),
+        )
+
+    if remove_missing:
+        placeholders = ", ".join("?" for _ in questions)
+        connection.execute(
+            f"DELETE FROM questions WHERE id NOT IN ({placeholders})",
+            [question["id"] for question in questions],
+        )
 
 
 def seed_questions() -> None:
@@ -482,46 +749,102 @@ def seed_questions() -> None:
     questions = load_questions_from_json()
 
     with get_connection() as connection:
-        for question in questions:
+        _sync_questions(connection, questions)
+
+
+def load_game_settings(*, default_actual_gender: str = "boy") -> dict[str, str]:
+    """Load persisted editor settings with an environment-compatible fallback."""
+    fallback_gender = normalize_actual_gender(default_actual_gender)
+    if not GAME_SETTINGS_PATH.exists():
+        return {"actual_gender": fallback_gender}
+
+    try:
+        with GAME_SETTINGS_PATH.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {"actual_gender": fallback_gender}
+
+    if not isinstance(data, dict):
+        return {"actual_gender": fallback_gender}
+
+    try:
+        actual_gender = normalize_actual_gender(str(data.get("actual_gender", "")))
+    except ValueError:
+        actual_gender = fallback_gender
+
+    return {"actual_gender": actual_gender}
+
+
+def _write_json_temp(path: Path, payload: Any) -> Path:
+    """Write JSON beside its destination and return the temporary path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary_file:
+        json.dump(payload, temporary_file, ensure_ascii=False, indent=2)
+        temporary_file.write("\n")
+        return Path(temporary_file.name)
+
+
+def _restore_file(path: Path, original_content: bytes | None) -> None:
+    """Restore a file after a failed editor transaction."""
+    if original_content is None:
+        path.unlink(missing_ok=True)
+        return
+
+    temporary_path = path.with_name(f".{path.name}.restore.tmp")
+    temporary_path.write_bytes(original_content)
+    os.replace(temporary_path, path)
+
+
+def save_editor_configuration(
+    *,
+    questions: Any,
+    actual_gender: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Atomically save editor data and synchronize the clean game database."""
+    normalized_questions = validate_question_definitions(questions)
+    normalized_gender = normalize_actual_gender(actual_gender)
+
+    original_questions = (
+        QUESTIONS_PATH.read_bytes() if QUESTIONS_PATH.exists() else None
+    )
+    original_settings = (
+        GAME_SETTINGS_PATH.read_bytes() if GAME_SETTINGS_PATH.exists() else None
+    )
+    questions_temp = _write_json_temp(QUESTIONS_PATH, normalized_questions)
+    settings_temp = _write_json_temp(
+        GAME_SETTINGS_PATH,
+        {"actual_gender": normalized_gender},
+    )
+
+    try:
+        os.replace(questions_temp, QUESTIONS_PATH)
+        os.replace(settings_temp, GAME_SETTINGS_PATH)
+
+        with get_connection() as connection:
+            _sync_questions(connection, normalized_questions, remove_missing=True)
             connection.execute(
                 """
-                INSERT INTO questions (
-                    id,
-                    category,
-                    points,
-                    type,
-                    question,
-                    options_json,
-                    correct_answers_json,
-                    image_filename,
-                    is_auction,
-                    is_used
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                ON CONFLICT(id)
-                DO UPDATE SET
-                    category = excluded.category,
-                    points = excluded.points,
-                    type = excluded.type,
-                    question = excluded.question,
-                    options_json = excluded.options_json,
-                    correct_answers_json = excluded.correct_answers_json,
-                    image_filename = excluded.image_filename,
-                    is_auction = excluded.is_auction,
-                    updated_at = CURRENT_TIMESTAMP
+                UPDATE game_state
+                SET actual_gender = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
                 """,
-                (
-                    question["id"],
-                    question["category"],
-                    int(question["points"]),
-                    question["type"],
-                    question["question"],
-                    json.dumps(question.get("options", []), ensure_ascii=False),
-                    json.dumps(question.get("correct_answers", []), ensure_ascii=False),
-                    question.get("image"),
-                    1 if question.get("is_auction", False) else 0,
-                ),
+                (normalized_gender,),
             )
+    except Exception:
+        questions_temp.unlink(missing_ok=True)
+        settings_temp.unlink(missing_ok=True)
+        _restore_file(QUESTIONS_PATH, original_questions)
+        _restore_file(GAME_SETTINGS_PATH, original_settings)
+        raise
+
+    return normalized_questions, normalized_gender
 
 
 def parse_question_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -625,6 +948,22 @@ def are_all_questions_used() -> bool:
         ).fetchone()
 
     return int(row["remaining_count"]) == 0
+
+
+def are_any_questions_used() -> bool:
+    """Return True if at least one question has already been used."""
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM questions
+                WHERE is_used = 1
+            ) AS has_used
+            """
+        ).fetchone()
+
+    return bool(row["has_used"])
 
 
 def build_admin_board() -> list[dict[str, Any]]:
@@ -884,8 +1223,7 @@ def is_answer_correct(
     normalized_player_answer = normalize_answer(player_answer)
 
     normalized_correct_answers = {
-        normalize_answer(correct_answer)
-        for correct_answer in correct_answers
+        normalize_answer(correct_answer) for correct_answer in correct_answers
     }
 
     return normalized_player_answer in normalized_correct_answers
@@ -989,9 +1327,7 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
         for answer in answers:
             correct = normalize_answer(answer["answer"]) in normalized_correct_answers
             points_delta = (
-                int(question["points"])
-                if correct
-                else -int(question["points"])
+                int(question["points"]) if correct else -int(question["points"])
             )
 
             connection.execute(
@@ -1109,10 +1445,7 @@ def create_auction_snapshot(question_id: str) -> list[dict[str, Any]]:
             )
             VALUES (?, ?)
             """,
-            [
-                (question_id, int(player["id"]))
-                for player in active_players
-            ],
+            [(question_id, int(player["id"])) for player in active_players],
         )
 
     return active_players
@@ -1750,7 +2083,9 @@ def submit_baby_name(
         ).fetchone()
 
         if existing_player_name is not None:
-            raise ValueError("Вы уже предложили имя. Один игрок может предложить только одно имя.")
+            raise ValueError(
+                "Вы уже предложили имя. Один игрок может предложить только одно имя."
+            )
 
         existing = connection.execute(
             """
@@ -1955,4 +2290,3 @@ def reset_game(*, actual_gender: str) -> None:
             """,
             (normalized_gender,),
         )
-

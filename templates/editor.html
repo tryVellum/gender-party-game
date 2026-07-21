@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}Редактор игры — Gender Party{% endblock %}
+
+{% block content %}
+<main class="editor-screen">
+  <section class="editor-shell">
+    <header class="editor-header">
+      <div>
+        <p class="eyebrow">Gender Party</p>
+        <h1>Редактор игры</h1>
+        <p class="editor-intro">
+          Измените вопросы, ответы, фотографии, аукцион и правильный пол ребёнка.
+          Сохранять настройки можно только до начала игры или после полного сброса.
+        </p>
+      </div>
+
+      <div class="editor-header-actions">
+        <a class="secondary-button admin-link-button" href="{{ url_for('admin_page') }}">
+          ← К игровому полю
+        </a>
+        <button id="editor-save-button" class="primary-button editor-save-button" type="button">
+          Сохранить игру
+        </button>
+      </div>
+    </header>
+
+    <section class="editor-settings-card" aria-labelledby="editor-settings-title">
+      <div>
+        <h2 id="editor-settings-title">Основные настройки</h2>
+        <p>Пол используется в финальном раунде. Аукционным можно сделать один вопрос.</p>
+      </div>
+
+      <fieldset class="editor-gender-fieldset">
+        <legend>Правильный пол ребёнка</legend>
+        <label class="editor-radio-card boy">
+          <input type="radio" name="actual-gender" value="boy">
+          <span>Мальчик</span>
+        </label>
+        <label class="editor-radio-card girl">
+          <input type="radio" name="actual-gender" value="girl">
+          <span>Девочка</span>
+        </label>
+      </fieldset>
+
+      <fieldset class="editor-auction-fieldset">
+        <legend>Аукционный вопрос</legend>
+        <label class="editor-auction-none">
+          <input type="radio" name="auction-question" value="" checked>
+          <span>Без аукциона</span>
+        </label>
+        <p id="editor-auction-summary" class="editor-setting-note">Аукционный вопрос не выбран.</p>
+      </fieldset>
+    </section>
+
+    <div id="editor-status" class="editor-status" role="status" aria-live="polite"></div>
+
+    <div id="editor-loading" class="editor-loading">
+      Загрузка вопросов…
+    </div>
+
+    <div id="editor-topics" class="editor-topics hidden"></div>
+
+    <footer class="editor-footer hidden" id="editor-footer">
+      <p>После сохранения игровое поле администратора обновится автоматически.</p>
+      <button id="editor-save-bottom-button" class="primary-button editor-save-button" type="button">
+        Сохранить игру
+      </button>
+    </footer>
+  </section>
+</main>
+
+<template id="choice-option-template">
+  <div class="editor-option-row">
+    <label class="editor-correct-check" title="Отметить как правильный ответ">
+      <input class="editor-option-correct" type="checkbox">
+      <span>Верный</span>
+    </label>
+    <input class="text-input editor-option-input" type="text" maxlength="240" placeholder="Вариант ответа">
+    <button class="editor-remove-option" type="button" aria-label="Удалить вариант">×</button>
+  </div>
+</template>
+
+<script src="{{ url_for('static', filename='js/editor.js') }}"></script>
+{% endblock %}
