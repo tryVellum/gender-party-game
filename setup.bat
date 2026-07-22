@@ -1,50 +1,38 @@
 @echo off
-setlocal
+setlocal EnableExtensions
+chcp 65001 >nul
 cd /d "%~dp0"
 
-echo ========================================
-echo   Gender Party Game - установка
+echo Установка среды разработки Gender Party Game...
 
-echo ========================================
-
-where py >nul 2>nul
-if %errorlevel%==0 (
-    py -3.12 -m venv .venv 2>nul
-    if errorlevel 1 py -3 -m venv .venv
+where py >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=py -3.12"
 ) else (
-    python -m venv .venv
+    set "PYTHON_CMD=python"
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    echo.
-    echo Не удалось создать виртуальное окружение.
-    echo Установите Python 3.11, 3.12 или 3.13 с сайта python.org
-    echo и включите пункт "Add Python to PATH".
-    pause
-    exit /b 1
+    %PYTHON_CMD% -m venv .venv
+    if errorlevel 1 goto error
 )
 
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
-if errorlevel 1 goto :install_error
+if errorlevel 1 goto error
 
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 goto :install_error
+".venv\Scripts\python.exe" -m pip install -r requirements-dev.txt
+if errorlevel 1 goto error
 
 ".venv\Scripts\python.exe" init_env.py
+if errorlevel 1 goto error
 
 echo.
-echo Установка завершена.
-echo Перед первой игрой откройте файл .env и настройте:
-echo   ADMIN_SECRET_PATH
-
-echo   ACTUAL_GENDER=boy или ACTUAL_GENDER=girl
-
-echo Затем запустите start_game.bat
+echo Готово. Для разработки используйте start_game.bat.
 pause
 exit /b 0
 
-:install_error
+:error
 echo.
-echo Ошибка установки зависимостей. Проверьте подключение к интернету.
+echo Установка завершилась с ошибкой.
 pause
 exit /b 1

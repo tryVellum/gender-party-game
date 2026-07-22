@@ -1,0 +1,84 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (for example 1.2.0)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.version }}") {
+            $version = "${{ inputs.version }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            $match = Select-String -Path version.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"'
+            $version = $match.Matches[0].Groups[1].Value
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+([.-][A-Za-z0-9]+)?$') {
+            throw "Invalid version: $version"
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer and portable package
+        shell: pwsh
+        run: |
+          ./build/build_release.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -SkipDependencyInstall
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: GenderPartyGame-${{ steps.version.outputs.version }}-Windows
+          path: |
+            release/GenderPartyGame-Setup-${{ steps.version.outputs.version }}.exe
+            release/GenderPartyGame-Portable-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Gender Party Game ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/GenderPartyGame-Setup-${{ steps.version.outputs.version }}.exe
+            release/GenderPartyGame-Portable-${{ steps.version.outputs.version }}.zip

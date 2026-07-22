@@ -10,10 +10,10 @@ from unittest.mock import patch
 from PIL import Image
 
 
-os.environ.setdefault("ACTUAL_GENDER", "girl")
-os.environ.setdefault("ADMIN_SECRET_PATH", "test-admin")
-os.environ.setdefault("DEBUG", "0")
-os.environ.setdefault("SOCKETIO_ASYNC_MODE", "threading")
+os.environ["ACTUAL_GENDER"] = "girl"
+os.environ["ADMIN_SECRET_PATH"] = "test-admin"
+os.environ["DEBUG"] = "0"
+os.environ["SOCKETIO_ASYNC_MODE"] = "threading"
 
 from app import app, socketio  # noqa: E402
 from database import (  # noqa: E402
@@ -74,6 +74,9 @@ def test_main_game_flow() -> None:
     player_client = app.test_client()
 
     assert player_client.get("/").status_code == 200
+    health_response = player_client.get("/api/health")
+    assert health_response.status_code == 200
+    assert health_response.get_json()["app"] == "gender-party-game"
     assert player_client.get("/api/admin/board").status_code == 403
     assert player_client.get("/api/admin/editor").status_code == 403
     assert admin_client.get("/test-admin").status_code == 200
@@ -89,6 +92,7 @@ def test_main_game_flow() -> None:
     for source_question in source_questions:
         editor_question = dict(source_question)
         editor_question.pop("image", None)
+        editor_question["is_auction"] = editor_question["id"] == "parents_500"
         editor_questions.append(editor_question)
 
     editor_data_dir = Path("instance/test-editor-data")
@@ -250,7 +254,7 @@ def test_main_game_flow() -> None:
             json={
                 "device_token": "token-1",
                 "question_id": "parents_500",
-                "answer": "два",
+                "answer": get_question_by_id("parents_500")["correct_answers"][0],
             },
         ).status_code
         == 200
@@ -261,7 +265,9 @@ def test_main_game_flow() -> None:
     with get_connection() as connection:
         connection.execute("UPDATE questions SET is_used = 1")
 
-    assert admin_client.post("/api/admin/final/start").status_code == 200
+    with patch("app.get_configured_actual_gender", return_value="girl"):
+        assert admin_client.post("/api/admin/final/start").status_code == 200
+
     assert get_game_state()["actual_gender"] == "girl"
 
     assert (
@@ -302,7 +308,9 @@ def test_main_game_flow() -> None:
         == 400
     )
 
-    assert admin_client.post("/api/admin/game/reset").status_code == 200
+    with patch("app.get_configured_actual_gender", return_value="girl"):
+        assert admin_client.post("/api/admin/game/reset").status_code == 200
+
     assert list_players() == []
     assert get_game_state()["actual_gender"] == "girl"
 

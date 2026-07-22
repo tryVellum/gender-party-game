@@ -25,6 +25,14 @@ from flask import (
 from flask_socketio import SocketIO, emit, join_room
 
 from config import Config
+from version import APP_VERSION
+from runtime_paths import (
+    RESOURCE_DATA_DIR,
+    STATIC_DIR,
+    TEMPLATES_DIR,
+    USER_DATA_DIR,
+    ensure_user_data,
+)
 from database import (
     NicknameAlreadyExistsError,
     GameEditorValidationError,
@@ -75,11 +83,18 @@ from database import (
 )
 
 
-app = Flask(__name__)
+ensure_user_data()
+
+app = Flask(
+    __name__,
+    static_folder=str(STATIC_DIR),
+    template_folder=str(TEMPLATES_DIR),
+)
 app.config.from_object(Config)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
-DATA_DIR = Path(app.root_path) / "data"
+DATA_DIR = USER_DATA_DIR
+AUDIO_DIR = RESOURCE_DATA_DIR
 
 socketio = SocketIO(
     app,
@@ -499,7 +514,19 @@ def game_audio(filename: str) -> Any:
     if Path(filename).name != filename or filename not in ALLOWED_AUDIO_FILES:
         abort(404)
 
-    return send_from_directory(DATA_DIR, filename, max_age=3600)
+    return send_from_directory(AUDIO_DIR, filename, max_age=3600)
+
+
+@app.get("/api/health")
+def api_health() -> Any:
+    """Return a lightweight identity response for the desktop launcher."""
+    return jsonify(
+        {
+            "ok": True,
+            "app": "gender-party-game",
+            "version": APP_VERSION,
+        }
+    )
 
 
 @app.get("/")

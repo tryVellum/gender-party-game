@@ -4,34 +4,33 @@ import secrets
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / ".env"
-EXAMPLE_PATH = BASE_DIR / ".env.example"
+ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 
-def create_env_file() -> bool:
-    """Create a local .env file with generated secret values if it does not exist."""
-    if ENV_PATH.exists():
-        return False
-
-    template = EXAMPLE_PATH.read_text(encoding="utf-8")
-    secret_key = secrets.token_urlsafe(48)
-    admin_path = f"admin-{secrets.token_hex(8)}"
-
-    content = template.replace(
-        "replace-with-a-long-random-string",
-        secret_key,
-    ).replace(
-        "my-private-admin-page",
-        admin_path,
+def build_env_text() -> str:
+    """Build safe local development settings."""
+    secret_key = secrets.token_hex(32)
+    admin_path = f"admin-{secrets.token_urlsafe(20)}"
+    return (
+        f"SECRET_KEY={secret_key}\n"
+        f"ADMIN_SECRET_PATH={admin_path}\n"
+        "ACTUAL_GENDER=boy\n"
+        "HOST=0.0.0.0\n"
+        "PORT=5000\n"
+        "DEBUG=0\n"
+        "SOCKETIO_ASYNC_MODE=threading\n"
     )
 
-    ENV_PATH.write_text(content, encoding="utf-8")
+
+def main() -> None:
+    """Create .env for source development without overwriting existing secrets."""
+    if ENV_PATH.exists():
+        print(f"Файл уже существует: {ENV_PATH}")
+        return
+
+    ENV_PATH.write_text(build_env_text(), encoding="utf-8", newline="\n")
     print(f"Создан файл: {ENV_PATH}")
-    print(f"Секретный адрес администратора: http://127.0.0.1:5000/{admin_path}")
-    return True
 
 
 if __name__ == "__main__":
-    if not create_env_file():
-        print(f"Файл {ENV_PATH} уже существует. Настройки сохранены без изменений.")
+    main()

@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Any
 
 
-BASE_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = BASE_DIR / "instance" / "game.sqlite"
-QUESTIONS_PATH = BASE_DIR / "data" / "questions.json"
-GAME_SETTINGS_PATH = BASE_DIR / "instance" / "game_settings.json"
+from runtime_paths import (
+    DATABASE_PATH,
+    GAME_SETTINGS_PATH,
+    QUESTIONS_PATH,
+    ensure_user_data,
+)
+
+
+ensure_user_data()
 
 QUESTION_CATEGORIES = ("Беременность", "Родители", "Роды", "Что это?")
 QUESTION_POINTS = (100, 200, 300, 400, 500)

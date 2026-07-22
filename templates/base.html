@@ -7,7 +7,12 @@
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
 
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>
+  <script>
+    if (typeof window.io === "undefined") {
+      document.write('<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"><\/script>');
+    }
+  </script>
 </head>
 <body>
   {% block content %}{% endblock %}
