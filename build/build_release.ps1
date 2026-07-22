@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = "",
     [switch]$SkipDependencyInstall,
     [switch]$SkipTests
@@ -8,7 +8,21 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$SpecPath = Join-Path $Root "build\GenderPartyGame.spec"
+$LauncherPath = Join-Path $Root "launcher.py"
 Set-Location $Root
+
+if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) {
+    throw "Launcher script was not found: $LauncherPath"
+}
+
+if (-not (Test-Path -LiteralPath $SpecPath -PathType Leaf)) {
+    throw "PyInstaller spec file was not found: $SpecPath"
+}
+
+Write-Host "Project root: $Root"
+Write-Host "Launcher: $LauncherPath"
+Write-Host "PyInstaller spec: $SpecPath"
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw "Сборка установщика поддерживается только на Windows."
@@ -69,7 +83,11 @@ python -m PyInstaller `
     --clean `
     --workpath $BuildDirectory `
     --distpath $DistDirectory `
-    (Join-Path $Root "build\GenderPartyGame.spec")
+    $SpecPath
+
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE."
+}
 
 $ApplicationDirectory = Join-Path $DistDirectory "GenderPartyGame"
 $ApplicationExe = Join-Path $ApplicationDirectory "GenderPartyGame.exe"

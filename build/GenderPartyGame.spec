@@ -3,7 +3,17 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 
-ROOT = Path(SPECPATH).resolve().parent.parent
+# SPEC is the complete path of this spec file. The project root is the
+# parent of the directory that contains build/GenderPartyGame.spec.
+SPEC_FILE = Path(SPEC).resolve()
+ROOT = SPEC_FILE.parent.parent
+
+LAUNCHER_PATH = ROOT / "launcher.py"
+if not LAUNCHER_PATH.is_file():
+    raise FileNotFoundError(
+        f"Launcher script was not found: {LAUNCHER_PATH}. "
+        f"Resolved spec file: {SPEC_FILE}"
+    )
 ICON_PATH = ROOT / "assets" / "gender-party.ico"
 VERSION_FILE = ROOT / "build" / "version_info.txt"
 
@@ -27,7 +37,7 @@ datas = [
 ]
 
 analysis = Analysis(
-    [str(ROOT / "launcher.py")],
+    [str(LAUNCHER_PATH)],
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,
