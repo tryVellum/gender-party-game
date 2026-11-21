@@ -161,11 +161,11 @@ function showWaitingState() {
 
 function escapeHtml(value) {
   return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function showWaitingStateWithResult(resultText, durationMs = 3500) {
@@ -980,6 +980,14 @@ if (babyNameForm) {
 }
 
 function applyGameState(gameState) {
+  if (gameState && gameState.player && currentPlayer) {
+    currentPlayer.score = gameState.player.score;
+    currentPlayer.nickname = gameState.player.nickname;
+    if (playerScore) {
+      playerScore.textContent = String(gameState.player.score);
+    }
+  }
+
   const phase = gameState.state.current_phase;
 
   if (phase === "answer_reveal") {
@@ -1122,6 +1130,18 @@ if (nicknameForm) {
   });
 }
 
+let resyncDebounceTimer = null;
+
+function scheduleResyncGameState() {
+  if (resyncDebounceTimer !== null) {
+    window.clearTimeout(resyncDebounceTimer);
+  }
+  resyncDebounceTimer = window.setTimeout(() => {
+    resyncDebounceTimer = null;
+    resyncGameState();
+  }, 100);
+}
+
 async function resyncGameState() {
   const deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY);
   if (!deviceToken || !currentPlayer) {
@@ -1147,21 +1167,21 @@ socket.on("connect", () => {
     device_token: deviceToken,
   });
 
-  resyncGameState();
+  scheduleResyncGameState();
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
-    resyncGameState();
+    scheduleResyncGameState();
   }
 });
 
 window.addEventListener("pageshow", () => {
-  resyncGameState();
+  scheduleResyncGameState();
 });
 
 window.addEventListener("focus", () => {
-  resyncGameState();
+  scheduleResyncGameState();
 });
 
 socket.on("presence_probe", (data) => {

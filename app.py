@@ -1919,6 +1919,7 @@ def api_game_state() -> Any:
         {
             "ok": True,
             "server_time_ms": current_time_ms(),
+            "player": player,
             "state": {
                 "current_phase": state["current_phase"],
                 "question_open": bool(state["question_open"]),
