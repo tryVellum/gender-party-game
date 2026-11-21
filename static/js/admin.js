@@ -21,6 +21,7 @@ const adminQuestionTitle = document.getElementById("admin-question-title");
 const adminQuestionImageWrap = document.getElementById("admin-question-image-wrap");
 const adminQuestionImage = document.getElementById("admin-question-image");
 const adminQuestionOptions = document.getElementById("admin-question-options");
+const adminForceFinishAuctionButton = document.getElementById("admin-force-finish-auction-button");
 
 const finalModal = document.getElementById("final-modal");
 const finalCard = document.getElementById("final-card");
@@ -268,9 +269,9 @@ function renderRating(players) {
           <td>${index + 1}</td>
           <td>
             <span class="player-status-dot ${statusClass}" title="${statusTitle}"></span>
-            ${player.nickname}
+            ${escapeHtml(player.nickname)}
           </td>
-          <td>${player.score}</td>
+          <td>${escapeHtml(player.score)}</td>
         </tr>
       `;
     })
@@ -461,6 +462,14 @@ function renderAdminQuestionCard(question, auction = null, winner = null) {
   adminQuestionCategory.textContent = `${question.category} · ${question.points} баллов`;
   updateAdminQuestionTitleScale(question.question || "");
 
+  if (adminForceFinishAuctionButton) {
+    if (question.is_auction && !winner) {
+      adminForceFinishAuctionButton.classList.remove("hidden");
+    } else {
+      adminForceFinishAuctionButton.classList.add("hidden");
+    }
+  }
+
   if (question.is_auction) {
   adminQuestionTitle.textContent = winner && question.question
     ? question.question
@@ -470,8 +479,8 @@ function renderAdminQuestionCard(question, auction = null, winner = null) {
     adminQuestionOptions.innerHTML = `
       <div class="auction-admin-text">
         <p>Вопрос достался игроку:</p>
-        <strong>${winner.nickname}</strong>
-        <p>Ставка: ${winner.bid}</p>
+        <strong>${escapeHtml(winner.nickname)}</strong>
+        <p>Ставка: ${escapeHtml(winner.bid)}</p>
         <p class="small-note">После ответа победителя нажмите на карточку, чтобы закрыть вопрос.</p>
       </div>
     `;
@@ -500,7 +509,7 @@ function renderAdminQuestionCard(question, auction = null, winner = null) {
 
   if (question.type === "choice") {
     adminQuestionOptions.innerHTML = question.options
-      .map((option) => `<div class="admin-option-preview">${option}</div>`)
+      .map((option) => `<div class="admin-option-preview">${escapeHtml(option)}</div>`)
       .join("");
     return;
   }
@@ -513,6 +522,10 @@ function renderAdminQuestionCard(question, auction = null, winner = null) {
 }
 
 function hideAdminQuestionCard() {
+  if (adminForceFinishAuctionButton) {
+    adminForceFinishAuctionButton.classList.add("hidden");
+  }
+
   if (currentQuestion && currentQuestion.is_auction) {
     stopAuctionSound();
   }
@@ -679,8 +692,8 @@ function renderSecretNames(names) {
     .map((item) => {
       return `
         <tr>
-          <td>${item.display_name}</td>
-          <td>${item.rating}</td>
+          <td>${escapeHtml(item.display_name)}</td>
+          <td>${escapeHtml(item.rating)}</td>
         </tr>
       `;
     })
@@ -1051,6 +1064,26 @@ if (adminQuestionCard) {
     }
 
     closeCurrentQuestion();
+  });
+}
+
+if (adminForceFinishAuctionButton) {
+  adminForceFinishAuctionButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    adminForceFinishAuctionButton.disabled = true;
+    try {
+      const response = await fetchWithTimeout("/api/admin/auction/force-finish", {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        alert(data.message || "Не удалось завершить аукцион досрочно.");
+      }
+    } catch (error) {
+      alert("Ошибка сети при завершении аукциона.");
+    } finally {
+      adminForceFinishAuctionButton.disabled = false;
+    }
   });
 }
 
