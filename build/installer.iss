@@ -53,7 +53,7 @@ Name: "{autodesktop}\Gender Party Game"; Filename: "{app}\{#MyAppExeName}"; Work
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRuleName}"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRuleName}"" dir=in action=allow program=""{app}\{#MyAppExeName}"" enable=yes profile=private protocol=TCP localport=5000"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRuleName}"" dir=in action=allow program=""{app}\{#MyAppExeName}"" enable=yes profile=any protocol=TCP localport=5000"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить Gender Party Game"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

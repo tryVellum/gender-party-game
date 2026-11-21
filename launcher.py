@@ -144,10 +144,13 @@ def read_health() -> dict[str, Any] | None:
     return payload
 
 
-def wait_for_server() -> bool:
+def wait_for_server(server_thread: threading.Thread | None = None) -> bool:
     """Wait until the local Flask server answers its identity endpoint."""
     deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if server_thread is not None and not server_thread.is_alive():
+            logging.error("Server thread stopped unexpectedly.")
+            return False
         if read_health() is not None:
             return True
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -273,7 +276,7 @@ def main() -> int:
         )
         server_thread.start()
 
-        if not wait_for_server():
+        if not wait_for_server(server_thread):
             show_message(
                 "Не удалось запустить игру",
                 "Сервер не запустился. Закройте другие программы, которые могут "
