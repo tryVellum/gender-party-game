@@ -55,11 +55,11 @@ class GameEditorValidationError(ValueError):
 
 
 @contextmanager
-def get_connection() -> Iterator[sqlite3.Connection]:
+def get_connection(write: bool = False) -> Iterator[sqlite3.Connection]:
     """Provide a SQLite connection and always close it after use."""
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10, isolation_level=None)
     connection.row_factory = sqlite3.Row
 
     try:
@@ -67,10 +67,17 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute("PRAGMA busy_timeout = 5000")
+        if write:
+            connection.execute("BEGIN IMMEDIATE")
         yield connection
-        connection.commit()
+        if write:
+            connection.execute("COMMIT")
     except Exception:
-        connection.rollback()
+        if write:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
         raise
     finally:
         connection.close()
@@ -97,7 +104,7 @@ def ensure_column(
 
 def init_database() -> None:
     """Create required database tables."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS players (
@@ -407,7 +414,7 @@ def create_player(device_token: str, nickname: str) -> dict[str, Any]:
     if existing_player is not None:
         raise NicknameAlreadyExistsError("Nickname already exists.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             INSERT INTO players (device_token, nickname, score, connected)
@@ -425,7 +432,7 @@ def create_player(device_token: str, nickname: str) -> dict[str, Any]:
 
 def set_player_connected(device_token: str, connected: bool) -> None:
     """Update player connection flag by device token."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE players
@@ -446,7 +453,7 @@ def synchronize_player_connections(active_device_tokens: set[str]) -> None:
         }
     )
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE players
@@ -753,7 +760,7 @@ def seed_questions() -> None:
     """Synchronize question definitions from JSON while preserving game progress."""
     questions = load_questions_from_json()
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         _sync_questions(connection, questions)
 
 
@@ -832,7 +839,7 @@ def save_editor_configuration(
         os.replace(questions_temp, QUESTIONS_PATH)
         os.replace(settings_temp, GAME_SETTINGS_PATH)
 
-        with get_connection() as connection:
+        with get_connection(write=True) as connection:
             _sync_questions(connection, normalized_questions, remove_missing=True)
             connection.execute(
                 """
@@ -930,7 +937,7 @@ def get_question_by_id(question_id: str) -> dict[str, Any] | None:
 
 def mark_question_used(question_id: str) -> None:
     """Mark question as used."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE questions
@@ -972,7 +979,7 @@ def are_any_questions_used() -> bool:
 
 
 def build_admin_board() -> list[dict[str, Any]]:
-    """Build admin board grouped by category."""
+    """Build admin board grouped by category without exposing correct answers."""
     questions = list_questions()
     categories_order = ["Беременность", "Родители", "Роды", "Что это?"]
 
@@ -984,7 +991,12 @@ def build_admin_board() -> list[dict[str, Any]]:
         ]
 
         questions_by_points = {
-            question["points"]: question for question in category_questions
+            question["points"]: {
+                key: value
+                for key, value in question.items()
+                if key != "correct_answers"
+            }
+            for question in category_questions
         }
 
         board.append(
@@ -1038,7 +1050,7 @@ def set_current_question(
     auction_winner_player_id: int | None = None,
 ) -> None:
     """Set current open question with selected phase."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE game_state
@@ -1059,7 +1071,7 @@ def set_current_question(
 
 def clear_current_question() -> None:
     """Clear current question and return game to waiting phase."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE game_state
@@ -1094,7 +1106,7 @@ def start_answer_reveal(
     if started_at_ms <= 0 or ends_at_ms <= started_at_ms:
         raise ValueError("Answer reveal timing is invalid.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE game_state
@@ -1115,7 +1127,7 @@ def start_answer_reveal(
 
 def finish_answer_reveal(sequence_id: str) -> bool:
     """Finish one answer reveal sequence and return whether it was active."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         result = connection.execute(
             """
             UPDATE game_state
@@ -1150,7 +1162,7 @@ def save_player_answer(
     if not normalized_answer:
         raise ValueError("Answer is required.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             INSERT INTO answers (
@@ -1172,7 +1184,7 @@ def save_player_answer(
 
 def lock_answers_for_question(question_id: str) -> None:
     """Lock all answers for selected question."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE answers
@@ -1255,7 +1267,7 @@ def update_player_score(
     points_delta: int,
 ) -> int:
     """Update player score and return new score."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE players
@@ -1287,7 +1299,7 @@ def set_answer_result(
     points_delta: int,
 ) -> None:
     """Save answer checking result."""
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             UPDATE answers
@@ -1319,7 +1331,7 @@ def close_question_and_calculate_scores(question_id: str) -> list[dict[str, Any]
 
     score_updates: list[dict[str, Any]] = []
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         answers = connection.execute(
             """
             SELECT id, player_id, question_id, answer, locked
@@ -1432,7 +1444,7 @@ def create_auction_snapshot(question_id: str) -> list[dict[str, Any]]:
     """Create auction participants snapshot from currently active players."""
     active_players = list_active_players()
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             "DELETE FROM auction_participants WHERE question_id = ?",
             (question_id,),
@@ -1551,7 +1563,7 @@ def save_auction_bid(
     if bid < 0:
         raise ValueError("Ставка не может быть отрицательной.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         player_row = connection.execute(
             """
             SELECT score
@@ -1675,6 +1687,102 @@ def set_auction_winner(
     )
 
 
+def force_finish_auction(question_id: str) -> dict[str, Any]:
+    """Force finish auction bidding, determining a winner from submitted bids or default bid 0."""
+    with get_connection(write=True) as connection:
+        state = connection.execute(
+            "SELECT current_phase, current_question_id FROM game_state WHERE id = 1"
+        ).fetchone()
+
+        if state is None or state["current_phase"] != "auction_bidding":
+            raise ValueError("Аукцион не находится в фазе сбора ставок.")
+
+        if str(state["current_question_id"]) != str(question_id):
+            raise ValueError("Указанный вопрос не является текущим вопросом аукциона.")
+
+        participant_rows = connection.execute(
+            "SELECT player_id FROM auction_participants WHERE question_id = ?",
+            (question_id,),
+        ).fetchall()
+
+        for participant in participant_rows:
+            pid = int(participant["player_id"])
+            existing_bid = connection.execute(
+                "SELECT id FROM auction_bids WHERE question_id = ? AND player_id = ?",
+                (question_id, pid),
+            ).fetchone()
+            if existing_bid is None:
+                connection.execute(
+                    "INSERT INTO auction_bids (question_id, player_id, bid) VALUES (?, ?, 0)",
+                    (question_id, pid),
+                )
+
+        if not participant_rows:
+            active_player = connection.execute(
+                "SELECT id FROM players WHERE is_online = 1 ORDER BY score DESC, id ASC LIMIT 1"
+            ).fetchone()
+            if active_player is None:
+                active_player = connection.execute(
+                    "SELECT id FROM players ORDER BY score DESC, id ASC LIMIT 1"
+                ).fetchone()
+
+            if active_player is not None:
+                pid = int(active_player["id"])
+                connection.execute(
+                    "INSERT INTO auction_participants (question_id, player_id) VALUES (?, ?)",
+                    (question_id, pid),
+                )
+                connection.execute(
+                    "INSERT INTO auction_bids (question_id, player_id, bid) VALUES (?, ?, 0)",
+                    (question_id, pid),
+                )
+            else:
+                raise ValueError(
+                    "Нет доступных игроков для определения победителя аукциона."
+                )
+
+        winner_row = connection.execute(
+            """
+            SELECT
+                auction_bids.id,
+                auction_bids.question_id,
+                auction_bids.player_id,
+                auction_bids.bid,
+                auction_bids.created_at,
+                players.nickname,
+                players.score
+            FROM auction_bids
+            JOIN players ON players.id = auction_bids.player_id
+            WHERE auction_bids.question_id = ?
+            ORDER BY auction_bids.bid DESC, auction_bids.created_at ASC, auction_bids.id ASC
+            LIMIT 1
+            """,
+            (question_id,),
+        ).fetchone()
+
+        if winner_row is None:
+            raise ValueError("Не удалось определить победителя аукциона.")
+
+        winner = dict(winner_row)
+        winner_player_id = int(winner["player_id"])
+
+        connection.execute(
+            """
+            UPDATE game_state
+            SET
+                current_phase = 'auction_question',
+                current_question_id = ?,
+                question_open = 1,
+                auction_winner_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            """,
+            (question_id, winner_player_id),
+        )
+
+        return winner
+
+
 def close_auction_question_and_calculate_score(
     question_id: str,
 ) -> list[dict[str, Any]]:
@@ -1757,7 +1865,7 @@ def start_final_round(*, actual_gender: str) -> None:
     """Start final gender voting round."""
     normalized_gender = normalize_actual_gender(actual_gender)
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             DELETE FROM final_votes
@@ -1800,7 +1908,7 @@ def schedule_final_reveal(
     if not sequence_id.strip():
         raise ValueError("Не задан идентификатор раскрытия финала.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         claimed = connection.execute(
             """
             UPDATE game_state
@@ -1844,7 +1952,7 @@ def save_final_vote(
     if int(state["final_locked"]):
         raise ValueError("Ответы финального раунда уже зафиксированы.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             INSERT INTO final_votes (
@@ -1907,7 +2015,7 @@ def reveal_final_round() -> list[dict[str, Any]]:
     """Finalize the scheduled answer and double scores for correct voters once."""
     score_updates: list[dict[str, Any]] = []
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         state = connection.execute(
             """
             SELECT current_phase, actual_gender
@@ -1957,7 +2065,10 @@ def reveal_final_round() -> list[dict[str, Any]]:
                 continue
 
             old_score = int(player_row["score"])
-            new_score = old_score * 2
+            if old_score < 0:
+                new_score = 0
+            else:
+                new_score = old_score * 2
 
             connection.execute(
                 """
@@ -2004,7 +2115,7 @@ def start_secret_round() -> None:
     if state["current_phase"] != "final_revealed":
         raise ValueError("Секретный раунд доступен только после раскрытия финала.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute(
             """
             DELETE FROM baby_names
@@ -2070,7 +2181,7 @@ def submit_baby_name(
     if state["current_phase"] != "secret_names":
         raise ValueError("Секретный раунд сейчас не открыт.")
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         existing_player_name = connection.execute(
             """
             SELECT
@@ -2170,24 +2281,7 @@ def vote_for_baby_name(
     if state["current_phase"] != "secret_names":
         raise ValueError("Секретный раунд сейчас не открыт.")
 
-    with get_connection() as connection:
-        player_row = connection.execute(
-            """
-            SELECT score
-            FROM players
-            WHERE id = ?
-            """,
-            (player_id,),
-        ).fetchone()
-
-        if player_row is None:
-            raise PlayerNotFoundError("Player was not found.")
-
-        current_score = int(player_row["score"])
-
-        if amount > current_score:
-            raise ValueError("Нельзя отдать больше баллов, чем у вас есть.")
-
+    with get_connection(write=True) as connection:
         name_row = connection.execute(
             """
             SELECT id
@@ -2199,6 +2293,40 @@ def vote_for_baby_name(
 
         if name_row is None:
             raise ValueError("Такого имени нет.")
+
+        cursor = connection.execute(
+            """
+            UPDATE players
+            SET score = score - ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND score >= ?
+            """,
+            (amount, player_id, amount),
+        )
+
+        if cursor.rowcount == 0:
+            player_row = connection.execute(
+                """
+                SELECT score
+                FROM players
+                WHERE id = ?
+                """,
+                (player_id,),
+            ).fetchone()
+
+            if player_row is None:
+                raise PlayerNotFoundError("Player was not found.")
+
+            raise ValueError("Нельзя отдать больше баллов, чем у вас есть.")
+
+        player_row = connection.execute(
+            """
+            SELECT score
+            FROM players
+            WHERE id = ?
+            """,
+            (player_id,),
+        ).fetchone()
+        new_score = int(player_row["score"])
 
         connection.execute(
             """
@@ -2219,17 +2347,6 @@ def vote_for_baby_name(
             WHERE id = ?
             """,
             (amount, name_id),
-        )
-
-        new_score = current_score - amount
-
-        connection.execute(
-            """
-            UPDATE players
-            SET score = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (new_score, player_id),
         )
 
     return {
@@ -2255,7 +2372,7 @@ def reset_game(*, actual_gender: str) -> None:
     """Reset the whole game, including registered players."""
     normalized_gender = normalize_actual_gender(actual_gender)
 
-    with get_connection() as connection:
+    with get_connection(write=True) as connection:
         connection.execute("DELETE FROM answers")
         connection.execute("DELETE FROM auction_participants")
         connection.execute("DELETE FROM auction_bids")
