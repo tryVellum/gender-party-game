@@ -1,3 +1,3 @@
-# Generated browser dependency
+# Vendor Dependencies
 
-`build/build_release.ps1` downloads `socket.io.min.js` into this directory before the Windows package is built. The generated JavaScript file is intentionally excluded from Git because the source pages retain a CDN fallback for development.
+`socket.io.min.js` (Socket.IO client 4.7.5) is bundled locally to ensure full offline operation in local Wi-Fi networks without external internet access or CDN fallback delays.

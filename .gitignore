@@ -38,7 +38,17 @@ dist/
 build-output/
 release/
 *.spec.bak
-static/vendor/socket.io.min.js
+
+# SQLite databases outside instance
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Test coverage
+.coverage
+htmlcov/
 
 # Portable mode runtime data
 user-data/
