@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import socket
+import threading
 import time
 import uuid
 from io import BytesIO
@@ -46,6 +47,7 @@ from database import (
     close_question_and_calculate_scores,
     create_auction_snapshot,
     create_player,
+    force_finish_auction,
     get_answer_for_player,
     get_auction_bid_for_player,
     get_auction_progress,
@@ -105,6 +107,7 @@ socketio = SocketIO(
 )
 
 
+state_lock = threading.RLock()
 connected_player_tokens_by_sid: dict[str, str] = {}
 connected_sids_by_player_token: dict[str, set[str]] = {}
 presence_acknowledgements_by_probe: dict[str, set[str]] = {}
@@ -139,11 +142,12 @@ def get_lan_ip_address() -> str:
 
 def refresh_connected_players_from_socket_registry() -> None:
     """Restore connected=1 for players that currently have active socket sessions."""
-    active_tokens = [
-        device_token
-        for device_token, sids in connected_sids_by_player_token.items()
-        if sids
-    ]
+    with state_lock:
+        active_tokens = [
+            device_token
+            for device_token, sids in connected_sids_by_player_token.items()
+            if sids
+        ]
 
     for device_token in active_tokens:
         set_player_connected(device_token=device_token, connected=True)
@@ -291,7 +295,8 @@ def complete_answer_reveal(sequence_id: str, ends_at_ms: int) -> None:
             },
         )
     finally:
-        active_answer_reveal_sequences.discard(sequence_id)
+        with state_lock:
+            active_answer_reveal_sequences.discard(sequence_id)
 
 
 def ensure_answer_reveal_task(
@@ -314,11 +319,17 @@ def ensure_answer_reveal_task(
 
     if normalized_ends_at_ms <= current_time_ms():
         finish_answer_reveal(normalized_sequence_id)
-        active_answer_reveal_sequences.discard(normalized_sequence_id)
+        with state_lock:
+            active_answer_reveal_sequences.discard(normalized_sequence_id)
         return get_game_state()
 
-    if normalized_sequence_id not in active_answer_reveal_sequences:
-        active_answer_reveal_sequences.add(normalized_sequence_id)
+    should_start_task = False
+    with state_lock:
+        if normalized_sequence_id not in active_answer_reveal_sequences:
+            active_answer_reveal_sequences.add(normalized_sequence_id)
+            should_start_task = True
+
+    if should_start_task:
         socketio.start_background_task(
             complete_answer_reveal,
             normalized_sequence_id,
@@ -331,7 +342,8 @@ def ensure_answer_reveal_task(
 def probe_active_player_tokens() -> set[str]:
     """Confirm player presence through two invisible client acknowledgements."""
     probe_id = uuid.uuid4().hex
-    presence_acknowledgements_by_probe[probe_id] = set()
+    with state_lock:
+        presence_acknowledgements_by_probe[probe_id] = set()
 
     payload = {
         "probe_id": probe_id,
@@ -344,7 +356,8 @@ def probe_active_player_tokens() -> set[str]:
     socketio.emit("presence_probe", payload)
     socketio.sleep(PRESENCE_PROBE_SECOND_WAIT_SECONDS)
 
-    return presence_acknowledgements_by_probe.pop(probe_id, set())
+    with state_lock:
+        return presence_acknowledgements_by_probe.pop(probe_id, set())
 
 
 def complete_scheduled_final_reveal(sequence_id: str, reveal_at_ms: int) -> None:
@@ -392,9 +405,11 @@ def complete_scheduled_final_reveal(sequence_id: str, reveal_at_ms: int) -> None
                     "is_correct": True,
                     "effective_at_ms": reveal_at_ms,
                 },
+                room=f"player_{score_update['player_id']}",
             )
     finally:
-        active_final_reveal_sequences.discard(sequence_id)
+        with state_lock:
+            active_final_reveal_sequences.discard(sequence_id)
 
 
 def ensure_final_reveal_task(state: dict[str, Any] | None = None) -> None:
@@ -411,15 +426,18 @@ def ensure_final_reveal_task(state: dict[str, Any] | None = None) -> None:
         return
 
     normalized_sequence_id = str(sequence_id)
-    if normalized_sequence_id in active_final_reveal_sequences:
-        return
+    should_start_task = False
+    with state_lock:
+        if normalized_sequence_id not in active_final_reveal_sequences:
+            active_final_reveal_sequences.add(normalized_sequence_id)
+            should_start_task = True
 
-    active_final_reveal_sequences.add(normalized_sequence_id)
-    socketio.start_background_task(
-        complete_scheduled_final_reveal,
-        normalized_sequence_id,
-        int(reveal_at_ms),
-    )
+    if should_start_task:
+        socketio.start_background_task(
+            complete_scheduled_final_reveal,
+            normalized_sequence_id,
+            int(reveal_at_ms),
+        )
 
 
 def build_current_question_payload() -> dict[str, Any] | None:
@@ -860,12 +878,13 @@ def api_reset_game() -> Any:
     """Reset game progress."""
     reset_game(actual_gender=get_configured_actual_gender())
 
-    connected_player_tokens_by_sid.clear()
-    connected_sids_by_player_token.clear()
-    presence_acknowledgements_by_probe.clear()
-    auction_opening_question_ids.clear()
-    active_final_reveal_sequences.clear()
-    active_answer_reveal_sequences.clear()
+    with state_lock:
+        connected_player_tokens_by_sid.clear()
+        connected_sids_by_player_token.clear()
+        presence_acknowledgements_by_probe.clear()
+        auction_opening_question_ids.clear()
+        active_final_reveal_sequences.clear()
+        active_answer_reveal_sequences.clear()
 
     board = build_admin_board()
     players = list_players()
@@ -955,16 +974,17 @@ def api_open_question(question_id: str) -> Any:
         ), 409
 
     if question["is_auction"]:
-        if question_id in auction_opening_question_ids:
-            return jsonify(
-                {
-                    "ok": False,
-                    "error": "auction_presence_check_in_progress",
-                    "message": "Проверка подключения игроков уже выполняется.",
-                }
-            ), 409
+        with state_lock:
+            if question_id in auction_opening_question_ids:
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": "auction_presence_check_in_progress",
+                        "message": "Проверка подключения игроков уже выполняется.",
+                    }
+                ), 409
 
-        auction_opening_question_ids.add(question_id)
+            auction_opening_question_ids.add(question_id)
 
         try:
             confirmed_tokens = probe_active_player_tokens()
@@ -1008,7 +1028,8 @@ def api_open_question(question_id: str) -> Any:
                 }
             )
         finally:
-            auction_opening_question_ids.discard(question_id)
+            with state_lock:
+                auction_opening_question_ids.discard(question_id)
 
     set_current_question(question_id)
 
@@ -1153,6 +1174,7 @@ def api_close_current_question() -> Any:
                 "points_delta": score_update["points_delta"],
                 "is_correct": score_update["is_correct"],
             },
+            room=f"player_{score_update['player_id']}",
         )
 
     return jsonify(
@@ -1427,6 +1449,82 @@ def api_save_auction_bid() -> Any:
     )
 
 
+@app.post("/api/admin/auction/force-finish")
+def api_admin_force_finish_auction() -> Any:
+    """Force finish auction bidding and select winner immediately."""
+    state = get_game_state()
+    if state["current_phase"] != "auction_bidding":
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "not_in_auction_bidding",
+                    "message": "Аукцион не находится в фазе сбора ставок.",
+                }
+            ),
+            409,
+        )
+
+    question_id = state.get("current_question_id")
+    if not question_id:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "no_current_question",
+                    "message": "Текущий вопрос аукциона не найден.",
+                }
+            ),
+            409,
+        )
+
+    try:
+        winner = force_finish_auction(str(question_id))
+    except ValueError as error:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "force_finish_failed",
+                    "message": str(error),
+                }
+            ),
+            400,
+        )
+
+    winner_player_id = int(winner["player_id"])
+    question_payload = build_current_question_payload()
+    winner_payload = {
+        "player_id": winner_player_id,
+        "nickname": winner["nickname"],
+        "bid": winner["bid"],
+    }
+
+    socketio.emit(
+        "auction_winner_selected",
+        {
+            "winner": winner_payload,
+        },
+    )
+
+    socketio.emit(
+        "auction_question_for_winner",
+        {
+            "question": question_payload,
+            "bid": winner["bid"],
+        },
+        to=f"player_{winner_player_id}",
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "winner": winner_payload,
+            "question": question_payload,
+        }
+    )
+
+
 @app.post("/api/admin/final/start")
 def api_start_final_round() -> Any:
     """Start final round."""
@@ -1624,15 +1722,17 @@ def handle_presence_ack(data: dict[str, Any] | None = None) -> None:
     if not probe_id or not device_token:
         return
 
-    acknowledgements = presence_acknowledgements_by_probe.get(probe_id)
-    if acknowledgements is None:
-        return
+    with state_lock:
+        acknowledgements = presence_acknowledgements_by_probe.get(probe_id)
+        if acknowledgements is None:
+            return
 
-    player = get_player_by_token(device_token)
-    if player is None:
-        return
+        player = get_player_by_token(device_token)
+        if player is None:
+            return
 
-    acknowledgements.add(device_token)
+        acknowledgements.add(device_token)
+
     set_player_connected(device_token=device_token, connected=True)
 
 
@@ -1664,12 +1764,13 @@ def handle_player_identify(data: dict[str, str]) -> None:
         return
 
     set_player_connected(device_token=device_token, connected=True)
-    connected_player_tokens_by_sid[request.sid] = device_token
+    with state_lock:
+        connected_player_tokens_by_sid[request.sid] = device_token
 
-    if device_token not in connected_sids_by_player_token:
-        connected_sids_by_player_token[device_token] = set()
+        if device_token not in connected_sids_by_player_token:
+            connected_sids_by_player_token[device_token] = set()
 
-    connected_sids_by_player_token[device_token].add(request.sid)
+        connected_sids_by_player_token[device_token].add(request.sid)
 
     join_room(f"player_{player['id']}")
 
@@ -1715,6 +1816,8 @@ def handle_admin_request_rating() -> None:
 @socketio.on("admin_request_board")
 def handle_admin_request_board() -> None:
     """Send current board to admin."""
+    if not session.get("is_admin"):
+        return
     emit(
         "board_updated",
         {
@@ -2010,6 +2113,7 @@ def api_vote_for_baby_name() -> Any:
             "points_delta": score_update["points_delta"],
             "is_correct": True,
         },
+        room=f"player_{score_update['player_id']}",
     )
 
     return jsonify(
@@ -2037,19 +2141,24 @@ def api_list_baby_names() -> Any:
 @socketio.on("disconnect")
 def handle_disconnect() -> None:
     """Mark player as disconnected when all socket connections are lost."""
-    device_token = connected_player_tokens_by_sid.pop(request.sid, None)
+    should_disconnect = False
+    with state_lock:
+        device_token = connected_player_tokens_by_sid.pop(request.sid, None)
 
-    if not device_token:
-        return
+        if not device_token:
+            return
 
-    player_sids = connected_sids_by_player_token.get(device_token)
+        player_sids = connected_sids_by_player_token.get(device_token)
 
-    if player_sids is not None:
-        player_sids.discard(request.sid)
+        if player_sids is not None:
+            player_sids.discard(request.sid)
 
-        if not player_sids:
-            connected_sids_by_player_token.pop(device_token, None)
-            set_player_connected(device_token=device_token, connected=False)
+            if not player_sids:
+                connected_sids_by_player_token.pop(device_token, None)
+                should_disconnect = True
+
+    if should_disconnect:
+        set_player_connected(device_token=device_token, connected=False)
 
     socketio.emit(
         "rating_updated",
