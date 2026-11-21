@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from database import (  # noqa: E402
     DATABASE_PATH,
     build_admin_board,
     create_player,
+    force_finish_auction,
     get_game_state,
     init_database,
     reset_game,
@@ -22,6 +24,8 @@ from database import (  # noqa: E402
     save_final_vote,
     schedule_final_reveal,
     seed_questions,
+    set_current_question,
+    set_player_connected,
     start_final_round,
     start_secret_round,
     submit_baby_name,
@@ -244,3 +248,92 @@ def test_wait_for_server_dead_thread() -> None:
     with patch("launcher.read_health", return_value=None):
         with patch("launcher.POLL_INTERVAL_SECONDS", 0.01):
             assert wait_for_server(DummyThread()) is False
+
+
+def test_force_finish_auction_when_participants_empty_prefers_connected() -> None:
+    """When auction_participants has 0 rows, fallback must select connected player without SQL error."""
+    setup_clean_db()
+
+    p_offline = create_player("token-off", "Офлайн Игрок")
+    p_online = create_player("token-on", "Онлайн Игрок")
+
+    update_player_score(player_id=p_offline["id"], points_delta=500)
+    update_player_score(player_id=p_online["id"], points_delta=100)
+
+    # p_online is connected (connected=1), p_offline is not
+    set_player_connected("token-off", False)
+    set_player_connected("token-on", True)
+
+    set_current_question("parents_300", phase="auction_bidding")
+
+    # Force finish when auction_participants is empty
+    winner = force_finish_auction("parents_300")
+    assert winner is not None
+    assert winner["player_id"] == p_online["id"]
+    assert winner["bid"] == 0
+
+    state = get_game_state()
+    assert state["current_phase"] == "auction_question"
+    assert state["auction_winner_player_id"] == p_online["id"]
+
+
+def test_api_game_state_returns_player_profile() -> None:
+    """api_game_state must include player object for valid device_token to support mobile resync."""
+    setup_clean_db()
+
+    player = create_player("token-resync", "Ресинхронизируемый")
+    update_player_score(player_id=player["id"], points_delta=175)
+
+    client = app.test_client()
+    res = client.get("/api/game-state?device_token=token-resync")
+    assert res.status_code == 200
+    data = res.get_json()
+
+    assert data["ok"] is True
+    assert "player" in data
+    assert data["player"]["id"] == player["id"]
+    assert data["player"]["nickname"] == "Ресинхронизируемый"
+    assert data["player"]["score"] == 175
+
+
+def test_concurrent_writes_and_atomic_balance() -> None:
+    """Concurrent baby name votes must never overdraft balance or deadlock SQLite."""
+    setup_clean_db()
+
+    player = create_player("token-stress", "Стресс Игрок")
+    update_player_score(player_id=player["id"], points_delta=100)
+
+    start_final_round(actual_gender="girl")
+    schedule_final_reveal(
+        drumroll_start_at_ms=1000,
+        reveal_at_ms=2000,
+        sequence_id="test-seq-stress",
+    )
+    reveal_final_round()
+    start_secret_round()
+
+    item = submit_baby_name(player_id=player["id"], name="София")
+    name_id = item["id"]
+
+    # 10 concurrent threads each attempt to vote 20 points (total 200 > 100 available)
+    successes = 0
+    failures = 0
+
+    def attempt_vote() -> bool:
+        try:
+            vote_for_baby_name(player_id=player["id"], name_id=name_id, amount=20)
+            return True
+        except ValueError:
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(attempt_vote) for _ in range(10)]
+        for f in concurrent.futures.as_completed(futures):
+            if f.result():
+                successes += 1
+            else:
+                failures += 1
+
+    # Exactly 5 transactions of 20 points should succeed (5 * 20 = 100), and 5 must fail
+    assert successes == 5
+    assert failures == 5
