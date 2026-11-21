@@ -622,8 +622,8 @@ function renderAuctionWaitingWinner(winner) {
   playerAnswerArea.innerHTML = `
     <div class="auction-player-card">
       <p>Вопрос достался игроку:</p>
-      <strong>${winner.nickname}</strong>
-      <p>Ставка: ${winner.bid}</p>
+      <strong>${escapeHtml(winner.nickname)}</strong>
+      <p>Ставка: ${escapeHtml(winner.bid)}</p>
       <p>Ожидаем ответ победителя...</p>
     </div>
   `;
@@ -679,8 +679,8 @@ function renderBabyNames(names) {
       return `
         <div class="baby-name-item">
           <div>
-            <strong>${item.display_name}</strong>
-            <span>Рейтинг: ${item.rating}</span>
+            <strong>${escapeHtml(item.display_name)}</strong>
+            <span>Рейтинг: ${escapeHtml(item.rating)}</span>
           </div>
 
           <form class="baby-name-vote-form" data-name-id="${item.id}">
@@ -1122,6 +1122,20 @@ if (nicknameForm) {
   });
 }
 
+async function resyncGameState() {
+  const deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY);
+  if (!deviceToken || !currentPlayer) {
+    return;
+  }
+
+  try {
+    const gameState = await fetchGameState(deviceToken);
+    applyGameState(gameState);
+  } catch (error) {
+    console.warn("Не удалось синхронизировать состояние игры:", error);
+  }
+}
+
 socket.on("connect", () => {
   const deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY);
 
@@ -1132,6 +1146,22 @@ socket.on("connect", () => {
   socket.emit("player_identify", {
     device_token: deviceToken,
   });
+
+  resyncGameState();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    resyncGameState();
+  }
+});
+
+window.addEventListener("pageshow", () => {
+  resyncGameState();
+});
+
+window.addEventListener("focus", () => {
+  resyncGameState();
 });
 
 socket.on("presence_probe", (data) => {
