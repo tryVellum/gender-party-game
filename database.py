@@ -1719,7 +1719,7 @@ def force_finish_auction(question_id: str) -> dict[str, Any]:
 
         if not participant_rows:
             active_player = connection.execute(
-                "SELECT id FROM players WHERE is_online = 1 ORDER BY score DESC, id ASC LIMIT 1"
+                "SELECT id FROM players WHERE connected = 1 ORDER BY score DESC, id ASC LIMIT 1"
             ).fetchone()
             if active_player is None:
                 active_player = connection.execute(
