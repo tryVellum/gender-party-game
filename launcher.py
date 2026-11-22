@@ -12,14 +12,26 @@ import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from tkinter import Tk, messagebox
 from typing import Any
 
-import pystray
 from PIL import Image
 
 from runtime_paths import APP_DATA_ROOT, LOG_DIR, RESOURCE_ROOT, ensure_user_data
 from version import APP_VERSION
+
+try:
+    from tkinter import Tk, messagebox
+except ImportError:  # pragma: no cover
+    Tk = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
+
+pystray: Any = None
+try:
+    if os.getenv("GENDER_PARTY_NO_TRAY", "0") != "1":
+        if not (sys.platform.startswith("linux") and not os.getenv("DISPLAY")):
+            import pystray
+except Exception:  # Headless Linux, missing DISPLAY, or missing backend
+    pystray = None
 
 
 APP_TITLE = "Gender Party Game"
@@ -54,17 +66,27 @@ def configure_logging() -> Path:
 
 
 def show_message(title: str, message: str, *, error: bool = False) -> None:
-    """Show a native Windows dialog without leaving a visible Tk window."""
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
+    """Show a native Windows dialog without leaving a visible Tk window, falling back to log."""
+    log_func = logging.error if error else logging.info
+    log_func("%s: %s", title, message)
+
+    if Tk is None or messagebox is None:
+        return
+
     try:
-        if error:
-            messagebox.showerror(title, message, parent=root)
-        else:
-            messagebox.showinfo(title, message, parent=root)
-    finally:
-        root.destroy()
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            if error:
+                messagebox.showerror(title, message, parent=root)
+            else:
+                messagebox.showinfo(title, message, parent=root)
+        finally:
+            root.destroy()
+    except Exception:
+        # GUI unavailable (e.g. headless environment or missing DISPLAY)
+        pass
 
 
 def acquire_single_instance_mutex() -> bool:
@@ -201,10 +223,34 @@ def load_tray_image() -> Image.Image:
     return Image.new("RGBA", (64, 64), (255, 255, 255, 255))
 
 
-def exit_application(icon: pystray.Icon, _item: pystray.MenuItem | None = None) -> None:
+def get_tray_module() -> Any:
+    """Return the pystray module if available in the current environment."""
+    global pystray
+    if pystray is not None:
+        return pystray
+    if os.getenv("GENDER_PARTY_NO_TRAY", "0") == "1":
+        return None
+    if sys.platform.startswith("linux") and not os.getenv("DISPLAY"):
+        return None
+    try:
+        import pystray as _pystray
+
+        pystray = _pystray
+        return pystray
+    except Exception:
+        return None
+
+
+def is_tray_supported() -> bool:
+    """Return whether the system tray is supported and available."""
+    return get_tray_module() is not None
+
+
+def exit_application(icon: Any, _item: Any = None) -> None:
     """Stop the tray icon and terminate the local server process."""
     logging.info("Application exit requested from the tray menu.")
-    icon.stop()
+    if icon is not None and hasattr(icon, "stop"):
+        icon.stop()
     os._exit(0)
 
 
@@ -217,27 +263,31 @@ def open_data_folder() -> None:
     open_url(APP_DATA_ROOT.as_uri())
 
 
-def create_tray_icon() -> pystray.Icon:
+def create_tray_icon() -> Any:
     """Create the notification-area controls for the background server."""
-    menu = pystray.Menu(
-        pystray.MenuItem(
+    tray = get_tray_module()
+    if tray is None:
+        raise RuntimeError("System tray is not supported in this environment.")
+
+    menu = tray.Menu(
+        tray.MenuItem(
             "Открыть игру",
             lambda _icon, _item: open_url(admin_url()),
             default=True,
         ),
-        pystray.MenuItem(
+        tray.MenuItem(
             "Редактор вопросов",
             lambda _icon, _item: open_url(editor_url()),
         ),
-        pystray.MenuItem(
+        tray.MenuItem(
             "Папка данных",
             lambda _icon, _item: open_data_folder(),
         ),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Завершить игру", exit_application),
+        tray.Menu.SEPARATOR,
+        tray.MenuItem("Завершить игру", exit_application),
     )
 
-    return pystray.Icon(
+    return tray.Icon(
         "GenderPartyGame",
         load_tray_image(),
         APP_TITLE,
@@ -288,14 +338,29 @@ def main() -> int:
 
         open_url(admin_url())
 
-        if os.getenv("GENDER_PARTY_NO_TRAY", "0") == "1":
+        if os.getenv("GENDER_PARTY_NO_TRAY", "0") == "1" or not is_tray_supported():
+            if (
+                not is_tray_supported()
+                and os.getenv("GENDER_PARTY_NO_TRAY", "0") != "1"
+            ):
+                logging.info(
+                    "System tray is not supported in this environment; running in foreground."
+                )
             while server_thread.is_alive():
                 time.sleep(0.5)
             return 0
 
-        tray_icon = create_tray_icon()
-        tray_icon.run()
-        return 0
+        try:
+            tray_icon = create_tray_icon()
+            tray_icon.run()
+            return 0
+        except Exception:
+            logging.exception(
+                "Failed to run system tray icon; falling back to foreground loop."
+            )
+            while server_thread.is_alive():
+                time.sleep(0.5)
+            return 0
     except Exception:
         logging.exception("Unexpected launcher failure")
         show_message(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ["ACTUAL_GENDER"] = "girl"
 os.environ["ADMIN_SECRET_PATH"] = "test-admin"
@@ -337,3 +337,108 @@ def test_concurrent_writes_and_atomic_balance() -> None:
     # Exactly 5 transactions of 20 points should succeed (5 * 20 = 100), and 5 must fail
     assert successes == 5
     assert failures == 5
+
+
+def test_launcher_headless_without_display() -> None:
+    """Ensure get_tray_module and is_tray_supported return None/False on Linux without DISPLAY."""
+    import launcher
+
+    with patch.object(launcher, "pystray", None):
+        with patch.object(launcher.sys, "platform", "linux"):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("DISPLAY", None)
+                assert launcher.get_tray_module() is None
+                assert launcher.is_tray_supported() is False
+
+
+def test_launcher_headless_no_tray_env() -> None:
+    """Ensure GENDER_PARTY_NO_TRAY=1 prevents system tray module initialization."""
+    import launcher
+
+    with patch.object(launcher, "pystray", None):
+        with patch.dict(os.environ, {"GENDER_PARTY_NO_TRAY": "1"}):
+            assert launcher.get_tray_module() is None
+            assert launcher.is_tray_supported() is False
+
+
+def test_launcher_create_tray_icon_unsupported() -> None:
+    """create_tray_icon must raise RuntimeError if tray backend is unavailable."""
+    import launcher
+
+    with patch.object(launcher, "get_tray_module", return_value=None):
+        with pytest.raises(RuntimeError, match="System tray is not supported"):
+            launcher.create_tray_icon()
+
+
+def test_launcher_show_message_headless_fallback() -> None:
+    """show_message must not raise even if Tkinter initialization fails (headless)."""
+    import launcher
+
+    with patch.object(launcher, "Tk", side_effect=Exception("no display name")):
+        launcher.show_message("Test Title", "Message text", error=False)
+        launcher.show_message("Error Title", "Error text", error=True)
+
+    with patch.object(launcher, "Tk", None):
+        launcher.show_message("No Tk Title", "Message text", error=False)
+
+
+def test_launcher_exit_application() -> None:
+    """exit_application must stop the tray icon and exit process."""
+    import launcher
+
+    mock_icon = MagicMock()
+    with patch.object(launcher.os, "_exit") as mock_exit:
+        launcher.exit_application(mock_icon)
+        mock_icon.stop.assert_called_once()
+        mock_exit.assert_called_once_with(0)
+
+
+def test_launcher_main_headless_fallback() -> None:
+    """main() must run server and foreground loop without attempting tray when unsupported."""
+    import launcher
+
+    with (
+        patch.object(launcher, "acquire_single_instance_mutex", return_value=True),
+        patch.object(launcher, "read_health", return_value=None),
+        patch.object(launcher, "wait_for_server", return_value=True),
+        patch.object(launcher, "open_url"),
+        patch.object(launcher, "is_tray_supported", return_value=False),
+        patch.object(launcher, "create_tray_icon") as mock_create_tray,
+        patch("threading.Thread") as mock_thread_cls,
+    ):
+        mock_thread = MagicMock()
+        mock_thread.is_alive.side_effect = [True, False]
+        mock_thread_cls.return_value = mock_thread
+
+        with patch("time.sleep"):
+            ret = launcher.main()
+
+        assert ret == 0
+        mock_create_tray.assert_not_called()
+
+
+def test_launcher_main_tray_run_exception_fallback() -> None:
+    """main() must catch exception from tray_icon.run() and gracefully fall back to server loop."""
+    import launcher
+
+    mock_tray_icon = MagicMock()
+    mock_tray_icon.run.side_effect = RuntimeError("Tray runner failed")
+
+    with (
+        patch.object(launcher, "acquire_single_instance_mutex", return_value=True),
+        patch.object(launcher, "read_health", return_value=None),
+        patch.object(launcher, "wait_for_server", return_value=True),
+        patch.object(launcher, "open_url"),
+        patch.object(launcher, "is_tray_supported", return_value=True),
+        patch.object(launcher, "create_tray_icon", return_value=mock_tray_icon),
+        patch("threading.Thread") as mock_thread_cls,
+    ):
+        mock_thread = MagicMock()
+        mock_thread.is_alive.side_effect = [True, False]
+        mock_thread_cls.return_value = mock_thread
+
+        with patch("time.sleep"):
+            ret = launcher.main()
+
+        assert ret == 0
+        mock_tray_icon.run.assert_called_once()
